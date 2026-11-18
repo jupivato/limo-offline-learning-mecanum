@@ -2,7 +2,7 @@
 
 Projeto de aprendizado offline (*behavioral cloning*) para controle holonômico e amarragem autônoma em malha fechada do robô **AgileX LIMO** em modo **Mecanum**, utilizando ROS 2 (`/odom` e `/cmd_vel` com `linear.x`, `linear.y` e `angular.z`).
 
-> **Alvo de Amarrage:** $(x = 0.0\text{ m},\; y = 0.0\text{ m},\; \theta = 0.0\text{ rad})$.  
+> **Alvo de Amarragem:** $(x = 0.0\text{ m},\; y = 0.0\text{ m},\; \theta = 0.0\text{ rad})$.  
 > O controlador lê a odometria acumulada das rodas e leva o robô de volta à origem onde o driver foi iniciado.
 
 ---
@@ -51,19 +51,19 @@ Em **todos** os terminais abertos no robô, carregue primeiro o ambiente ROS 2 c
 - **LIMO COBOT (Ubuntu 20.04 / ROS 2 Foxy):** `source /opt/ros/foxy/setup.bash`
 - **LIMO Standard (Ubuntu 22.04 / ROS 2 Humble):** `source /opt/ros/humble/setup.bash`
 
-### Terminal 1 — Iniciar o Driver dos Motores (`limo_base`)
+### Terminal 1 — Iniciar o Driver dos Motores (`limo_base` em modo Mecanum)
 ```bash
 # LIMO COBOT (Foxy):
 source /opt/ros/foxy/setup.bash
 source ~/limo_ros2_ws/install/setup.bash
-ros2 launch limo_base limo_base.launch.py
+ros2 launch limo_base limo_base.launch.py use_mcnamu:=true
 
 # OU LIMO Standard (Humble):
 source /opt/ros/humble/setup.bash
 source ~/agilex_ws/install/setup.bash
-ros2 launch limo_base limo_base.launch.py
+ros2 launch limo_base limo_base.launch.py use_mcnamu:=true
 ```
-*(Deixe este terminal aberto durante todo o teste).*
+*(Deixe este terminal aberto durante todo o teste. Se a porta serial `ttylimo` não for detectada, adicione `port_name:=ttyUSB0`. No LIMO COBOT, execute tudo diretamente via SSH no robô, pois `ROS_LOCALHOST_ONLY=1` evita falhas do CycloneDDS.)*
 
 ### Terminal 2 — Teleoperação (Levar o Robô ao Ponto de Partida)
 ```bash
