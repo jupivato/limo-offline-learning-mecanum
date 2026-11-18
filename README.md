@@ -1,40 +1,40 @@
-# LIMO Offline Learning — Modo Mecanum (Holonômico, 3 Saídas)
+# LIMO Offline Learning — Mode Mecanum (Holonome, 3 Sorties)
 
-Projeto de aprendizado offline (*behavioral cloning*) para controle holonômico e amarragem autônoma em malha fechada do robô **AgileX LIMO** em modo **Mecanum**, utilizando ROS 2 (`/odom` e `/cmd_vel` com `linear.x`, `linear.y` e `angular.z`).
+Projet d'apprentissage hors ligne (*behavioral cloning*) pour la commande holonome et l'amarrage autonome en boucle fermée du robot **AgileX LIMO** en mode **Mecanum**, sous ROS 2 (`/odom` et `/cmd_vel` avec `linear.x`, `linear.y` et `angular.z`).
 
-> **Alvo de Amarragem:** $(x = 0.0\text{ m},\; y = 0.0\text{ m},\; \theta = 0.0\text{ rad})$.  
-> O controlador lê a odometria acumulada das rodas e leva o robô de volta à origem onde o driver foi iniciado.
+> **Cible d'amarrage :** $(x = 0.0\text{ m},\; y = 0.0\text{ m},\; \theta = 0.0\text{ rad})$.  
+> Le contrôleur lit l'odométrie accumulée des roues et ramène le robot vers l'origine où le pilote a été démarré.
 
 ---
 
-## Estrutura do Projeto
+## Structure du projet
 
 ```text
 limo-offline-learning-mecanum/
 ├── data/
-│   └── dataset_mecanum.csv             # Dataset holonômico (45.000 amostras, 6 colunas)
+│   └── dataset_mecanum.csv             # Jeu de données holonome (45 000 échantillons, 6 colonnes)
 ├── models/
-│   ├── pioneer_mecanum_weights.json    # Pesos treinados da PioneerNN (3 -> 1000 -> 3)
-│   └── training_history_mecanum.json   # Histórico de perda MSE do treinamento
+│   ├── pioneer_mecanum_weights.json    # Poids entraînés du PioneerNN (3 -> 1000 -> 3)
+│   └── training_history_mecanum.json   # Historique de la perte MSE durant l'entraînement
 ├── src/
-│   ├── generate_dataset_mecanum.py     # Gerador do dataset (vx, vy, w)
-│   ├── train_mecanum.py                # Treinamento offline da rede neural
+│   ├── generate_dataset_mecanum.py     # Générateur du jeu de données (vx, vy, w)
+│   ├── train_mecanum.py                # Entraînement hors ligne du réseau de neurones
 │   ├── core/
-│   │   └── pioneer_nn.py               # Arquitetura MLP PioneerNN (PyTorch + fallback Python puro)
+│   │   └── pioneer_nn.py               # Architecture MLP PioneerNN (PyTorch + fallback Python pur)
 │   ├── ros2/
-│   │   ├── limo_interface.py           # Interface ROS 2 (/odom e /cmd_vel com linear.y)
-│   │   └── show_pose.py                # Monitor de pose (x, y, theta) em tempo real
+│   │   ├── limo_interface.py           # Interface ROS 2 (/odom et /cmd_vel avec linear.y)
+│   │   └── show_pose.py                # Moniteur de pose (x, y, theta) en temps réel
 │   └── evaluation/
-│       ├── data_logger.py              # Registro de telemetria a 20 Hz e gráficos
-│       └── run_autonomous.py           # Execução autônoma em malha fechada (padrão --mode mecanum)
+│       ├── data_logger.py              # Enregistrement de la télémétrie à 20 Hz et graphiques
+│       └── run_autonomous.py           # Exécution autonome en boucle fermée (défaut --mode mecanum)
 └── README.md
 ```
 
 ---
 
-## 1. Gerar Dataset e Treinar (Opcional)
+## 1. Générer le jeu de données et entraîner (optionnel)
 
-O dataset (`data/dataset_mecanum.csv`) e os pesos treinados (`models/pioneer_mecanum_weights.json`) já estão incluídos prontos para uso. Só execute os comandos abaixo se quiser regenerar ou retreinar:
+Le jeu de données (`data/dataset_mecanum.csv`) et les poids entraînés (`models/pioneer_mecanum_weights.json`) sont déjà inclus et prêts à l'emploi. Exécutez les commandes ci-dessous uniquement si vous souhaitez régénérer les données ou réentraîner le modèle :
 
 ```bash
 python3 src/generate_dataset_mecanum.py
@@ -43,52 +43,52 @@ python3 src/train_mecanum.py
 
 ---
 
-## 2. Execução no Robô Físico (AgileX LIMO — Modo Mecanum)
+## 2. Exécution sur le robot physique (AgileX LIMO — Mode Mecanum)
 
-> **Importante:** Antes de ligar o driver, certifique-se de que o LIMO físico está configurado no **modo Mecanum** e posicionado **exatamente no ponto alvo $(0, 0, 0)$**, alinhado para frente ($0^\circ$).
+> **Important :** Avant de lancer le pilote, assurez-vous que le LIMO physique est bien configuré en **mode Mecanum** et positionné **exactement au point cible $(0, 0, 0)$**, orienté vers l'avant ($0^\circ$).
 
-Em **todos** os terminais abertos no robô, carregue primeiro o ambiente ROS 2 correspondente:
-- **LIMO COBOT (Ubuntu 20.04 / ROS 2 Foxy):** `source /opt/ros/foxy/setup.bash`
-- **LIMO Standard (Ubuntu 22.04 / ROS 2 Humble):** `source /opt/ros/humble/setup.bash`
+Dans **tous** les terminaux ouverts sur le robot, chargez d'abord l'environnement ROS 2 correspondant :
+- **LIMO COBOT (Ubuntu 20.04 / ROS 2 Foxy) :** `source /opt/ros/foxy/setup.bash`
+- **LIMO Standard (Ubuntu 22.04 / ROS 2 Humble) :** `source /opt/ros/humble/setup.bash`
 
-### Terminal 1 — Iniciar o Driver dos Motores (`limo_base` em modo Mecanum)
+### Terminal 1 — Lancer le pilote des moteurs (`limo_base` en mode Mecanum)
 ```bash
-# LIMO COBOT (Foxy):
+# LIMO COBOT (Foxy) :
 source /opt/ros/foxy/setup.bash
 source ~/limo_ros2_ws/install/setup.bash
 ros2 launch limo_base limo_base.launch.py use_mcnamu:=true
 
-# OU LIMO Standard (Humble):
+# OU LIMO Standard (Humble) :
 source /opt/ros/humble/setup.bash
 source ~/agilex_ws/install/setup.bash
 ros2 launch limo_base limo_base.launch.py use_mcnamu:=true
 ```
-*(Deixe este terminal aberto durante todo o teste. Se a porta serial `ttylimo` não for detectada, adicione `port_name:=ttyUSB0`. No LIMO COBOT, execute tudo diretamente via SSH no robô, pois `ROS_LOCALHOST_ONLY=1` evita falhas do CycloneDDS.)*
+*(Laissez ce terminal ouvert pendant toute la durée du test. Si le port série `ttylimo` n'est pas détecté, ajoutez `port_name:=ttyUSB0`. Sur le LIMO COBOT, exécutez les commandes directement sur le robot — en local ou via SSH — car `ROS_LOCALHOST_ONLY=1` évite les plantages de CycloneDDS.)*
 
-### Terminal 2 — Teleoperação (Levar o Robô ao Ponto de Partida)
+### Terminal 2 — Téléopération (amener le robot au point de départ)
 ```bash
 source /opt/ros/foxy/setup.bash   # ou humble
 ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
-* `i` / `,` : Frente / Ré
-* `j` / `l` : Girar no lugar (esquerda / direita)
-* `k` : Parar imediatamente
+* `i` / `,` : Avant / Arrière
+* `j` / `l` : Rotation sur place (gauche / droite)
+* `k` : Arrêt immédiat
 
-Conduza o robô até a posição inicial desejada (ex.: $1.5\text{ m}$ ou $2.0\text{ m}$ de distância), aperte **`k`** para parar e saia com **`Ctrl + C`**.
+Conduisez le robot jusqu'à la position de départ souhaitée (par ex. à $1{,}5\text{ m}$ ou $2{,}0\text{ m}$ de distance), appuyez sur **`k`** pour l'arrêter, puis quittez avec **`Ctrl + C`**.
 
-### Terminal 3 — Executar o Controlador Autônomo Mecanum
+### Terminal 3 — Lancer le contrôleur autonome Mecanum
 ```bash
 source /opt/ros/foxy/setup.bash   # ou humble
 cd ~/limo-offline-learning-mecanum
 python3 src/evaluation/run_autonomous.py --real --speed-scale 0.6
 ```
-1. Confira a pose inicial exibida a partir do `/odom`.
-2. Pressione **`Enter`** para iniciar a navegação autônoma até $(0, 0, 0)$.
-3. Os logs e gráficos da execução serão salvos automaticamente em `data/evaluation/`.
+1. Vérifiez la pose initiale affichée depuis `/odom`.
+2. Appuyez sur **`Entrée`** pour démarrer la navigation autonome vers $(0, 0, 0)$.
+3. Les journaux et graphiques d'exécution sont enregistrés automatiquement dans `data/evaluation/`.
 
-> **Dica:** Para reduzir ainda mais a velocidade e evitar patinagem dos roletes mecanum no piso liso, use `--speed-scale 0.4` ou `0.5`.
+> **Astuce :** Pour réduire davantage la vitesse et limiter le patinage des rouleaux Mecanum sur sol lisse, utilisez `--speed-scale 0.4` ou `0.5`.
 
-### Terminal 4 (Opcional) — Monitorar a Pose em Tempo Real
+### Terminal 4 (optionnel) — Surveiller la pose en temps réel
 ```bash
 source /opt/ros/foxy/setup.bash   # ou humble
 cd ~/limo-offline-learning-mecanum
@@ -97,10 +97,10 @@ python3 src/ros2/show_pose.py
 
 ---
 
-## Comandos Úteis e Emergência
+## Commandes utiles et arrêt d'urgence
 
-| Ação | Comando |
+| Action | Commande |
 | :--- | :--- |
-| **Parada de emergência imediata** | `ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0, y: 0.0}, angular: {z: 0.0}}" --once` |
-| **Verificar frequência da odometria** | `ros2 topic hz /odom` (ou `/wheel/odom`) |
-| **Testar o modelo diferencial neste script** | `python3 src/evaluation/run_autonomous.py --real --mode diff --weights <caminho_pesos_diff.json>` |
+| **Arrêt d'urgence immédiat** | `ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0, y: 0.0}, angular: {z: 0.0}}" --once` |
+| **Vérifier la fréquence d'odométrie** | `ros2 topic hz /odom` (ou `/wheel/odom`) |
+| **Tester le modèle différentiel avec ce script** | `python3 src/evaluation/run_autonomous.py --real --mode diff --weights <chemin_poids_diff.json>` |
