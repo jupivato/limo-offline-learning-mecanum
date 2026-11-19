@@ -94,6 +94,8 @@ python3 src/evaluation/run_autonomous.py --real
 
 > **Astuce :** Pour réduire davantage la vitesse et limiter le patinage des rouleaux Mecanum sur sol lisse, utilisez `--speed-scale 0.4` ou `0.5` (surcharge ponctuelle de `config.json`).
 
+> **Topic d'odométrie :** par défaut (`ros2_and_safety.odom_topic = "auto"`), le contrôleur et `show_pose.py` utilisent le premier topic disponible dans l'ordre `/odom`, puis `/wheel/odom`. Si le robot publie les deux, fixez le topic voulu dans `config.json` (ex. `"odom_topic": "/odom"`) pour garantir que tous les outils lisent la même odométrie.
+
 ### Terminal 4 (optionnel) — Surveiller la pose en temps réel
 ```bash
 source /opt/ros/foxy/setup.bash   # ou humble

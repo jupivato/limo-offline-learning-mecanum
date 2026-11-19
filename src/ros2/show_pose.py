@@ -63,7 +63,7 @@ class PoseMonitor(Node):
             print(f"[PoseMonitor] Listening to topic: {topic}")
         else:
             print("[PoseMonitor] Searching for odometry stream on /wheel/odom and /odom...")
-            for candidate in ["/wheel/odom", "/odom"]:
+            for candidate in ["/odom", "/wheel/odom"]:  # same order as LimoROS2Interface
                 self.create_subscription(Odometry, candidate, lambda msg, t=candidate: self.cb(msg, t), 10)
 
     def cb(self, msg: Odometry, topic_name: str) -> None:

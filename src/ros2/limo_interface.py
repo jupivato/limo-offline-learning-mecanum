@@ -159,6 +159,8 @@ class LimoROS2Interface(Node):
                 print(f"[LimoROS2Interface] Waiting for valid odometry stream on {topics_str}...")
                 wait_start = time.time()
 
+        if not self._odom_received:
+            raise RuntimeError("[LimoROS2Interface] ROS 2 was shut down before any valid odometry frame was received.")
         print(f"[LimoROS2Interface] First valid odometry frame received on '{self.odom_topic}'.")
 
     def _odom_callback(self, msg: Odometry, topic_name: str = "/odom") -> None:

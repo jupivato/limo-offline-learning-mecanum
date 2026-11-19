@@ -176,6 +176,8 @@ def train_mecanum(
     weights_output = weights_output or net_cfg["weights_path"]
     history_output = history_output or net_cfg["history_path"]
     epochs = int(epochs if epochs is not None else net_cfg["epochs"])
+    if epochs < 1:
+        raise ValueError(f"epochs must be >= 1 (got {epochs})")
     batch_size = int(batch_size if batch_size is not None else net_cfg["batch_size"])
     # --lr (if given) sets the hidden-layer rate; the other groups keep their config ratio.
     lr_ratio = 1.0 if learning_rate is None else float(learning_rate) / float(net_cfg["lr_hidden"])

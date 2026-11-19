@@ -330,79 +330,84 @@ def run_autonomous_session(
         print("\n[Interrupted] Mission aborted by operator.")
     finally:
         robot.stop()
-        now = datetime.now()
-        timestamp_folder = now.strftime("test_%Y_%m_%d_%S_%M_%H")
+        try:
+            # Artifacts are saved inside a nested try so that the ROS node is always
+            # cleaned up, even if saving the CSV / plot / params.json fails.
+            now = datetime.now()
+            timestamp_folder = now.strftime("test_%Y_%m_%d_%H_%M_%S")
 
-        if output_dir and os.path.basename(os.path.normpath(output_dir)).startswith("test_"):
-            test_dir = output_dir
-        else:
-            base_eval_dir = output_dir if output_dir else "data/evaluation"
-            test_dir = os.path.join(base_eval_dir, timestamp_folder)
+            if output_dir and os.path.basename(os.path.normpath(output_dir)).startswith("test_"):
+                test_dir = output_dir if os.path.isabs(output_dir) else os.path.join(_project_root, output_dir)
+            else:
+                base_eval_dir = output_dir if output_dir else "data/evaluation"
+                if not os.path.isabs(base_eval_dir):
+                    base_eval_dir = os.path.join(_project_root, base_eval_dir)  # relative to the project root, not the CWD
+                test_dir = os.path.join(base_eval_dir, timestamp_folder)
 
-        data_dir = os.path.join(test_dir, "data")
-        images_dir = os.path.join(test_dir, "images")
-        os.makedirs(data_dir, exist_ok=True)
-        os.makedirs(images_dir, exist_ok=True)
+            data_dir = os.path.join(test_dir, "data")
+            images_dir = os.path.join(test_dir, "images")
+            os.makedirs(data_dir, exist_ok=True)
+            os.makedirs(images_dir, exist_ok=True)
 
-        prefix = "eval_success" if success else "eval_stop"
-        csv_path = os.path.join(data_dir, f"{prefix}.csv")
-        png_path = os.path.join(images_dir, f"{prefix}.png")
+            prefix = "eval_success" if success else "eval_stop"
+            csv_path = os.path.join(data_dir, f"{prefix}.csv")
+            png_path = os.path.join(images_dir, f"{prefix}.png")
 
-        logger.save(csv_path)
-        logger.save_plot(png_path)
+            logger.save(csv_path)
+            logger.save_plot(png_path)
 
-        final_pos = robot.get_position() if hasattr(robot, "get_position") else [0.0, 0.0, 0.0]
-        elapsed_sec = time.time() - start_time
-        err_dist = math.hypot(final_pos[0] - target[0], final_pos[1] - target[1])
-        err_theta = abs(recast_angle(final_pos[2] - target[2]))
-        err_pose = math.hypot(err_dist, HALF_TRACK_B * err_theta)
+            final_pos = robot.get_position() if hasattr(robot, "get_position") else [0.0, 0.0, 0.0]
+            elapsed_sec = time.time() - start_time
+            err_dist = math.hypot(final_pos[0] - target[0], final_pos[1] - target[1])
+            err_theta = abs(recast_angle(final_pos[2] - target[2]))
+            err_pose = math.hypot(err_dist, HALF_TRACK_B * err_theta)
 
-        params = {
-            "test_id": timestamp_folder,
-            "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "weights_path": os.path.abspath(weights_path),
-            "platform": "Robot Physique" if is_real else "Simulateur Gazebo",
-            "target": target,
-            "start_pose": teleport_to,
-            "final_position": [round(float(p), 4) for p in final_pos],
-            "success": success,
-            "elapsed_seconds": round(elapsed_sec, 3),
-            "dwell_time_verified_seconds": round(dwell_timer, 2),
-            "dwell_time_required_seconds": dwell_time_required,
-            "max_duration_seconds": max_duration,
-            "error_distance_m": round(err_dist, 4),
-            "error_theta_deg": round(math.degrees(err_theta), 2),
-            "error_se2_pose_m": round(err_pose, 4),
-            "tolerances": {
-                "dist_tol_m": dist_tol,
-                "angle_tol_rad": angle_tol,
-                "half_track_b_m": HALF_TRACK_B,
-            },
-            "kinematics": {
-                "speed_scale": eff_scale,
-                "v_max_nominal_mps": V_MAX,
-                "v_max_effective_mps": v_max_effective,
-                "w_max_radps": w_max_effective,
-                "x_max_m": X_MAX,
-                "y_max_m": Y_MAX,
-                "dt_sec": dt,
-            },
-            "artifacts": {
-                "folder": os.path.abspath(test_dir),
-                "params_json": os.path.abspath(os.path.join(test_dir, "params.json")),
-                "data_dir": os.path.abspath(data_dir),
-                "images_dir": os.path.abspath(images_dir),
-                "csv_path": os.path.abspath(csv_path),
-                "png_path": os.path.abspath(png_path)
+            params = {
+                "test_id": timestamp_folder,
+                "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "weights_path": os.path.abspath(weights_path),
+                "platform": "Robot Physique" if is_real else "Simulateur Gazebo",
+                "target": target,
+                "start_pose": teleport_to,
+                "final_position": [round(float(p), 4) for p in final_pos],
+                "success": success,
+                "elapsed_seconds": round(elapsed_sec, 3),
+                "dwell_time_verified_seconds": round(dwell_timer, 2),
+                "dwell_time_required_seconds": dwell_time_required,
+                "max_duration_seconds": max_duration,
+                "error_distance_m": round(err_dist, 4),
+                "error_theta_deg": round(math.degrees(err_theta), 2),
+                "error_se2_pose_m": round(err_pose, 4),
+                "tolerances": {
+                    "dist_tol_m": dist_tol,
+                    "angle_tol_rad": angle_tol,
+                    "half_track_b_m": HALF_TRACK_B,
+                },
+                "kinematics": {
+                    "speed_scale": eff_scale,
+                    "v_max_nominal_mps": V_MAX,
+                    "v_max_effective_mps": v_max_effective,
+                    "w_max_radps": w_max_effective,
+                    "x_max_m": X_MAX,
+                    "y_max_m": Y_MAX,
+                    "dt_sec": dt,
+                },
+                "artifacts": {
+                    "folder": os.path.abspath(test_dir),
+                    "params_json": os.path.abspath(os.path.join(test_dir, "params.json")),
+                    "data_dir": os.path.abspath(data_dir),
+                    "images_dir": os.path.abspath(images_dir),
+                    "csv_path": os.path.abspath(csv_path),
+                    "png_path": os.path.abspath(png_path)
+                }
             }
-        }
-        params_path = os.path.join(test_dir, "params.json")
-        with open(params_path, "w", encoding="utf-8") as f:
-            json.dump(params, f, indent=2, ensure_ascii=False)
-        print(f"[Success] Trial metadata and telemetry preserved in: {params_path}")
-
-        robot.cleanup()
-        rclpy.shutdown()
+            params_path = os.path.join(test_dir, "params.json")
+            with open(params_path, "w", encoding="utf-8") as f:
+                json.dump(params, f, indent=2, ensure_ascii=False)
+            print(f"[Success] Trial metadata and telemetry preserved in: {params_path}")
+        finally:
+            robot.cleanup()
+            rclpy.shutdown()
 
     return success
 
