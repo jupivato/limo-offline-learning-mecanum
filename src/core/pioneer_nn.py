@@ -278,10 +278,13 @@ class PioneerNN(BaseNN):
         """
         Loads synaptic weights from a JSON object.
         """
+        meta_input = json_obj.get("input_size", len(json_obj["input_weights"]))
         meta_hidden = json_obj.get("hidden_size", self.hidden_size)
         meta_output = json_obj.get("output_size", self.output_size)
         file_bias = json_obj.get("use_bias", False)
 
+        if meta_input != self.input_size or len(json_obj["input_weights"]) != self.input_size:
+            raise ValueError(f"Input layer mismatch: JSON={meta_input}, Model={self.input_size}")
         if meta_hidden != self.hidden_size:
             raise ValueError(f"Hidden layer mismatch: JSON={meta_hidden}, Model={self.hidden_size}")
         if meta_output != self.output_size:
@@ -335,26 +338,22 @@ class PioneerNN(BaseNN):
             json.dump(data, f, indent=2)
 
     def load_from_json_file(self, file_path: str) -> None:
-        resolved_path = file_path
-        if not os.path.exists(resolved_path):
-            candidates = [
-                os.path.join(_project_root, file_path),
-                os.path.join(_project_root, "models", "pioneer_mecanum_weights.json"),
-                os.path.join(_project_root, "models", "supervised_w_torch_diff.json"),
-                os.path.join(_project_root, "models", "pioneer_model_weights.json"),
-                os.path.join(os.path.dirname(os.path.abspath(file_path)), "pioneer_mecanum_weights.json"),
-                os.path.join(os.path.dirname(os.path.abspath(file_path)), "supervised_w_torch_diff.json"),
-                "models/pioneer_mecanum_weights.json",
-                "models/supervised_w_torch_diff.json",
-                "models/pioneer_model_weights.json",
-            ]
-            for cand in candidates:
-                if os.path.exists(cand):
-                    resolved_path = cand
-                    break
-
-        if not os.path.exists(resolved_path):
-            raise FileNotFoundError(f"Synaptic weights file not found: {file_path}")
+        """
+        Loads synaptic weights from exactly the requested file (absolute path, or
+        path relative to the current directory or to the project root). There is
+        no silent fallback to another weights file: a missing file raises.
+        """
+        candidates = [file_path]
+        if not os.path.isabs(file_path):
+            candidates.append(os.path.join(_project_root, file_path))
+        resolved_path = next((c for c in candidates if os.path.exists(c)), None)
+        if resolved_path is None:
+            raise FileNotFoundError(
+                f"Synaptic weights file not found: {file_path} "
+                f"(also tried {os.path.join(_project_root, file_path)})"
+            )
+        resolved_path = os.path.abspath(resolved_path)
         with open(resolved_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         self.load_weights_from_json(data)
+        print(f"[PioneerNN] Weights loaded from: {resolved_path}")

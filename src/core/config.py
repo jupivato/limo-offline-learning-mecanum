@@ -152,49 +152,62 @@ def evaluate_csv_trial_convergence(
     cfg: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
-    Unified post-hoc CSV trial evaluator used by `benchmark_visualizer.py` and
-    `calculate_iso_metrics.py` so that every tool applies the exact same arrival
-    and stationary dwell criterion.
+    Unified post-hoc CSV trial evaluator (fallback used by `benchmark_visualizer.py`
+    and `calculate_iso_metrics.py` when the live verdict is not available).
+
+    A trial is successful only if the FINAL CONTINUOUS segment of the log is
+    entirely inside the docking envelope (distance <= dist_tol, |e_theta| <=
+    angle_tol) with stopped commands (|v| <= stopped_vel_tol, |w| <= stopped_ang_tol)
+    and lasts at least `dwell_time - 2*dt` (the 2*dt margin accounts for the last
+    cycle, which is not logged at the moment the live loop declares success),
+    and the trial ended before `max_duration`.
     """
     if not rows:
         return False
 
-    dock_cfg = (cfg or load_config())["docking_and_iso"]
+    the_cfg = cfg or load_config()
+    dock_cfg = the_cfg["docking_and_iso"]
     d_tol = float(dist_tol if dist_tol is not None else dock_cfg["dist_tol"])
     a_tol = float(angle_tol if angle_tol is not None else dock_cfg["angle_tol"])
     vel_tol = float(dock_cfg["stopped_vel_tol"])
     ang_tol = float(dock_cfg["stopped_ang_tol"])
+    dwell_req = float(dwell_time_required if dwell_time_required is not None else dock_cfg["dwell_time"])
     max_dur = float(max_duration if max_duration is not None else dock_cfg["max_duration"])
+    dt = float(the_cfg["kinematics"]["dt"])
 
-    last = rows[-1]
-    first = rows[0]
-    try:
-        t0 = float(first.get("timestamp", 0.0))
-        tf = float(last.get("timestamp", 0.0))
-        xf = float(last.get("x", 0.0))
-        yf = float(last.get("y", 0.0))
-        thf = float(last.get("theta", 0.0))
-        ex = float(last.get("e_x", xf))
-        ey = float(last.get("e_y", yf))
-        eth = recast_angle_rad(float(last.get("e_theta", thf)))
-        vl = float(last.get("v_lin", 0.0))
-        vy = float(last.get("v_y", 0.0))
-        va = float(last.get("v_ang", 0.0))
-    except (ValueError, TypeError):
+    def _parse(row: Dict[str, Any]) -> Optional[Tuple[float, bool]]:
+        try:
+            t = float(row.get("timestamp", 0.0))
+            x = float(row.get("x", 0.0))
+            y = float(row.get("y", 0.0))
+            th = float(row.get("theta", 0.0))
+            ex = float(row.get("e_x", x))
+            ey = float(row.get("e_y", y))
+            eth = recast_angle_rad(float(row.get("e_theta", th)))
+            vl = float(row.get("v_lin", 0.0))
+            vy = float(row.get("v_y", 0.0))
+            va = float(row.get("v_ang", 0.0))
+        except (ValueError, TypeError):
+            return None
+        if not all(math.isfinite(val) for val in (t, x, y, th, ex, ey, eth, vl, vy, va)):
+            return None
+        docked = (math.hypot(ex, ey) <= d_tol and abs(eth) <= a_tol
+                  and math.hypot(vl, vy) <= vel_tol and abs(va) <= ang_tol)
+        return t, docked
+
+    first = _parse(rows[0])
+    last = _parse(rows[-1])
+    if first is None or last is None or not last[1]:
+        return False
+    if last[0] - first[0] >= max_dur:
         return False
 
-    if not all(math.isfinite(val) for val in (t0, tf, xf, yf, thf, ex, ey, eth, vl, vy, va)):
-        return False
+    # Walk back from the last row while the robot stays docked and stopped.
+    seg_start_t = last[0]
+    for row in reversed(rows):
+        parsed = _parse(row)
+        if parsed is None or not parsed[1]:
+            break
+        seg_start_t = parsed[0]
 
-    final_d = math.hypot(ex, ey)
-    final_eth = abs(eth)
-    duration = tf - t0
-
-    if final_d > d_tol or final_eth > a_tol:
-        return False
-    if duration >= max_dur:
-        return False
-    if math.hypot(vl, vy) > vel_tol or abs(va) > ang_tol:
-        return False
-
-    return True
+    return (last[0] - seg_start_t) >= (dwell_req - 2.0 * dt)

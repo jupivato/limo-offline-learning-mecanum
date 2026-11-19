@@ -214,7 +214,11 @@ def run_autonomous_session(
     pos_window: collections.deque[Tuple[float, float, float, float]] = collections.deque(maxlen=win_n)
 
     try:
+        last_loop_t = time.monotonic()
         while rclpy.ok():
+            loop_now = time.monotonic()
+            loop_step = loop_now - last_loop_t  # real (wall-clock) duration of the last cycle
+            last_loop_t = loop_now
             elapsed = time.time() - start_time
             if elapsed > max_duration:
                 print(f"\n[Timeout] Maximum mission duration reached ({max_duration:.1f} s).")
@@ -297,8 +301,8 @@ def run_autonomous_session(
                 dock_arrival_announced = False
 
             if elapsed > 1.0 and in_dock_envelope and is_stationary:
-                dwell_timer += dt
-                if int(dwell_timer / dt) % 20 == 0 or dwell_timer >= dwell_time_required:
+                dwell_timer += loop_step
+                if int(dwell_timer) != int(dwell_timer - loop_step) or dwell_timer >= dwell_time_required:
                     print(f"[Dock Dwell] Stationary in envelope: {dwell_timer:5.1f}s / {dwell_time_required:.1f}s (d={dist_xy*100:.1f}cm, θ={math.degrees(abs(e_theta)):.1f}°)")
 
                 if dwell_timer >= dwell_time_required:

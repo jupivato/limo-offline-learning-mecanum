@@ -70,6 +70,7 @@ COLUMNS = [
     "vx_robot",
     "vy_robot",
     "w_robot",
+    "group_id",
 ]
 
 MECANUM_CLASS_NAMES = {
@@ -80,6 +81,9 @@ MECANUM_CLASS_NAMES = {
     5: "Class 5: Holonomic Translation + CCW Rotation (v > 0, w > 0)",
     6: "Class 6: Holonomic Translation + CW Rotation (v > 0, w < 0)",
 }
+
+
+JITTERED_COUNTS: Dict[int, int] = {}
 
 
 def recast_angle(angle_rad: float) -> float:
@@ -230,7 +234,7 @@ def generate_mecanum_dataset(
 
     for m_id in range(1, 7):
         rng = random.Random(42 + m_id)
-        band_lists = [list(banded_pools[m_id][b].values()) for b in (0, 1, 2)]
+        band_lists = [[row + [tuple(row[:3])] for row in banded_pools[m_id][b].values()] for b in (0, 1, 2)]
         non_empty_bands = [b_list for b_list in band_lists if len(b_list) > 0]
 
         selected: List[List[float]] = []
@@ -254,12 +258,20 @@ def generate_mecanum_dataset(
                 jx = round(base[0] + rng.gauss(0.0, 0.0005), 4)
                 jy = round(base[1] + rng.gauss(0.0, 0.0005), 4)
                 jth = round(recast_angle(base[2] + rng.gauss(0.0, 0.0005)), 4)
-                selected.append([jx, jy, jth, base[3], base[4], base[5]])
+                selected.append([jx, jy, jth, base[3], base[4], base[5], base[6]])  # jittered copy inherits the base group
 
+        n_unique_total = sum(len(b) for b in non_empty_bands) if non_empty_bands else 0
+        n_jitter = max(0, min(len(selected), samples_per_class) - n_unique_total)
+        JITTERED_COUNTS[m_id] = n_jitter
         balanced.extend(selected[:samples_per_class])
         final_counts[m_id] = len(selected[:samples_per_class])
 
     random.Random(42).shuffle(balanced)
+    # group_id: one id per unique state; jittered copies share the id of their base
+    # state so that train/validation splits can keep a whole group on one side.
+    _gid: Dict[Tuple[float, float, float], int] = {}
+    for row in balanced:
+        row[6] = _gid.setdefault(row[6], len(_gid))
     return balanced, final_counts
 
 
@@ -290,7 +302,7 @@ def build_mecanum_dataset(
     print(f"Saved {len(samples)} samples to: {resolved}")
     print("Class distribution:")
     for m_id in range(1, 7):
-        print(f"  {MECANUM_CLASS_NAMES[m_id]:58s} -> {counts[m_id]}")
+        print(f"  {MECANUM_CLASS_NAMES[m_id]:58s} -> {counts[m_id]} | jittered copies: {JITTERED_COUNTS.get(m_id, 0)}")
     return len(samples)
 
 

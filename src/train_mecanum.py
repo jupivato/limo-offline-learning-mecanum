@@ -67,15 +67,23 @@ DEFAULT_WEIGHTS = _NET["weights_path"]
 DEFAULT_HISTORY = _NET["history_path"]
 
 
-def load_mecanum_dataset(csv_path: str) -> Tuple[List[List[float]], List[List[float]]]:
-    """Loads 6-column Mecanum dataset and normalizes inputs and 3 outputs to [-1, 1]."""
+def load_mecanum_dataset(csv_path: str) -> Tuple[List[List[float]], List[List[float]], List[int]]:
+    """
+    Loads the Mecanum dataset, normalizes inputs and 3 outputs to [-1, 1], and
+    returns the `group_id` of every sample (jittered copies share their base group).
+    """
     resolved = csv_path if os.path.exists(csv_path) else os.path.join(_project_root, csv_path)
     if not os.path.exists(resolved):
         raise FileNotFoundError(f"Mecanum dataset not found: {csv_path}")
 
-    inputs, targets = [], []
+    inputs, targets, groups = [], [], []
     with open(resolved, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+        if "group_id" not in (reader.fieldnames or []):
+            raise ValueError(
+                f"{resolved} has no 'group_id' column (needed for a leak-free train/validation "
+                f"split). Regenerate it with: python3 src/generate_dataset_mecanum.py"
+            )
         for row in reader:
             try:
                 xr = float(row["x_target_robot"])
@@ -84,6 +92,7 @@ def load_mecanum_dataset(csv_path: str) -> Tuple[List[List[float]], List[List[fl
                 vx = float(row["vx_robot"])
                 vy = float(row["vy_robot"])
                 w = float(row["w_robot"])
+                gid = int(row["group_id"])
 
                 inputs.append([
                     max(-1.0, min(1.0, xr / X_MAX)),
@@ -95,12 +104,30 @@ def load_mecanum_dataset(csv_path: str) -> Tuple[List[List[float]], List[List[fl
                     max(-1.0, min(1.0, vy / V_MAX)),
                     max(-1.0, min(1.0, w / W_MAX)),
                 ])
+                groups.append(gid)
             except (KeyError, ValueError):
                 continue
 
     if not inputs:
         raise ValueError(f"No valid samples found in {resolved}")
-    return inputs, targets
+    return inputs, targets, groups
+
+
+def group_train_val_split(groups: List[int], train_fraction: float, seed: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Leak-free train/validation split: whole groups (a unique state and its jittered
+    copies) are assigned to one side. Groups are permuted with `seed`.
+    """
+    rows_of: Dict[int, List[int]] = {}
+    for idx, gid in enumerate(groups):
+        rows_of.setdefault(gid, []).append(idx)
+    group_ids = list(rows_of.keys())
+    torch.manual_seed(seed)
+    gperm = torch.randperm(len(group_ids)).tolist()
+    n_train_groups = int(train_fraction * len(group_ids))
+    train_idx = [i for g in gperm[:n_train_groups] for i in rows_of[group_ids[g]]]
+    val_idx = [i for g in gperm[n_train_groups:] for i in rows_of[group_ids[g]]]
+    return torch.tensor(train_idx, dtype=torch.long), torch.tensor(val_idx, dtype=torch.long)
 
 
 def weighted_mecanum_loss(pred: torch.Tensor, target: torch.Tensor, beta: float = BETA) -> torch.Tensor:
@@ -159,7 +186,8 @@ def train_mecanum(
     use_bias = bool(use_bias if use_bias is not None else net_cfg["use_bias"])
     hidden_size = int(net_cfg["hidden_size"])
 
-    inputs, targets = load_mecanum_dataset(dataset_path)
+    inputs, targets, groups = load_mecanum_dataset(dataset_path)
+    n_groups = len(set(groups))
     X = torch.tensor(inputs, dtype=torch.float32)
     Y = torch.tensor(targets, dtype=torch.float32)
 
@@ -169,10 +197,8 @@ def train_mecanum(
     sample_w = w_far + w_near * torch.exp(-dist_n / near_scale)
 
     total = len(X)
-    train_size = int(float(net_cfg["val_split"]) * total)
-    torch.manual_seed(seed)
-    perm = torch.randperm(total)
-    train_idx, val_idx = perm[:train_size], perm[train_size:]
+    train_idx, val_idx = group_train_val_split(groups, float(net_cfg["val_split"]), seed)
+    train_size = len(train_idx)
 
     train_loader = DataLoader(
         TensorDataset(X[train_idx], Y[train_idx], sample_w[train_idx]),
@@ -211,6 +237,9 @@ def train_mecanum(
             "loss_near_dock_weight": list(net_cfg["loss_near_dock_weight"]),
             "reg_spread": list(net_cfg["reg_spread"]),
             "val_split": float(net_cfg["val_split"]),
+            "split": "by group_id (jittered copies stay with their base state)",
+            "n_groups": n_groups,
+            "n_jittered_rows": total - n_groups,
             "seed": seed,
         },
         "epochs": [],
@@ -246,6 +275,9 @@ def train_mecanum(
                 + (pred[:, 1] - by[:, 1]) ** 2
                 + BETA * (pred[:, 2] - by[:, 2]) ** 2
             ) / (2.0 + BETA)
+            # Optimized loss: near-dock weighted (bw = loss_near_dock_weight profile).
+            # The reported Train/Val losses and the best-epoch criterion use the
+            # unweighted `weighted_mecanum_loss`, so train and val stay comparable.
             data_loss = torch.mean(bw * err)
             out_norms = torch.norm(model.output.weight, dim=0)
             spread_reg = spread_gain * torch.mean((out_norms - spread_floor).clamp(max=0.0) ** 2)

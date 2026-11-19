@@ -6,6 +6,8 @@ Projet d'apprentissage hors ligne (*behavioral cloning*) pour la commande holono
 > Le contrôleur lit l'odométrie accumulée des roues et ramène le robot vers l'origine où le pilote a été démarré.
 >
 > **Paramètres :** tous les paramètres principaux sont lus uniquement dans `config.json` (aucune valeur par défaut cachée dans le code ; une clé manquante arrête le programme avec un message explicite). Le jeu de données utilise 7 500 échantillons par classe × 6 classes = 45 000 échantillons. Les valeurs d'entraînement réellement utilisées sont enregistrées dans `training_history_mecanum.json` (`effective_config`).
+>
+> **Validation sans fuite (modèle ré-entraîné le 22/11/2026).** Pour équilibrer les classes, le générateur complète les classes peu peuplées par des copies bruitées (±0,5 mm) d'états existants (16 940 copies, surtout dans les classes de rotation pure). Chaque échantillon porte un `group_id` et la séparation entraînement/validation se fait par groupe : une copie reste toujours du même côté que son état d'origine. La perte de validation est donc honnête (0,0092 contre 0,0089 auparavant, valeur alors optimiste). En simulation cinématique holonome, le nouveau modèle converge sur 40/40 essais, comme l'ancien.
 
 ---
 
