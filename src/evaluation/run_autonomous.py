@@ -1,30 +1,19 @@
 """
-Closed-Loop Autonomous Navigation and ISO 18646-2 Metrological Positioning
-===========================================================================
+Closed-Loop Autonomous Navigation and ISO 18646-2 Metrological Positioning (Mecanum)
+====================================================================================
 Executes closed-loop autonomous navigation with frozen synaptic weights on the 
 AgileX LIMO mobile robot at 20 Hz, supporting both Gazebo simulation and physical hardware.
 
-Core Functionalities:
----------------------
-1. Synaptic Policy Execution:
-   Loads the trained PioneerNN (3 inputs: x_target_robot, y_target_robot, e_theta).
-   Terminal stationarity guaranteed by execution-layer deadband and zero-velocity dwell hold.
-
-2. SE(2) Metrological Distance Metric:
-   Calculates Euclidean distance and Lie group SE(2) composite distance:
-       d_xy = sqrt((x - x_t)^2 + (y - y_t)^2)
-       d_pose = sqrt(d_xy^2 + (b * e_theta)^2)
-   where b = 0.086 m (half-track width of AgileX LIMO converting heading error into meters).
-
-3. Docking Envelope & Stationary Dwell-Time Watchdog:
-   - Capture Envelope: d_xy <= dist_tol (0.08 m = 8 cm) and |e_theta| <= angle_tol (0.26 rad ~ 15.0°).
-   - Stability Dwell-Time: Robot must remain continuously stationary (displacement < 5 mm,
-     velocities near zero) for at least 30.0 seconds within the capture envelope before declaring success.
-   - Any departure or drift resets the dwell timer to ensure metrological stability.
-
-4. Kinematic Limits & Damping:
-   - V_MAX = 0.50 m/s, W_MAX = 1.00 rad/s.
-   - Pure 100% neural policy execution without external geometric heuristics.
+Key Safety & Metrological Features:
+-----------------------------------
+1. Centralized Configuration: Reads defaults from `config.json`.
+2. Odometry NaN Filtering & Staleness Watchdog: Halts immediately if odometry
+   contains non-finite values or freezes beyond `odom_watchdog_timeout_s`.
+3. Vectorial Velocity Limiting: Clamps translational speed by Euclidean norm
+   sqrt(vx^2 + vy^2) <= V_MAX (preventing 0.71 m/s diagonal overspeed).
+4. Validated Gazebo Teleportation: Verifies simulator teleportation before
+   starting a trial; never runs with a forged pose offset.
+5. Unified ISO 18646-2 Docking & Dwell Verification: Uses `check_docking_and_stationarity`.
 
 Standards Compliance: ROS REP-103 & ISO 18646-2.
 Project: LIMO Offline Learning (CERV / Lab-STICC / ENIB).
@@ -37,22 +26,14 @@ import sys
 import time
 import math
 import json
-import shutil
 import argparse
 import collections
 from datetime import datetime
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Tuple
 
-# Dynamic project root resolution
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
-
-try:
-    import torch
-    TORCH_AVAILABLE = True
-except (ImportError, OSError):
-    TORCH_AVAILABLE = False
 
 try:
     import rclpy
@@ -60,99 +41,110 @@ try:
 except (ImportError, ModuleNotFoundError):
     ROS2_AVAILABLE = False
 
+from src.core.config import load_config, check_docking_and_stationarity, effective_speed_limits
 from src.core.pioneer_nn import PioneerNN, recast_angle
 from src.evaluation.data_logger import DataLogger
 
 try:
-    from src.ros2.limo_interface import LimoROS2Interface
+    from src.ros2.limo_interface import LimoROS2Interface, sanitize_and_clamp_twist
 except (ImportError, ModuleNotFoundError):
     LimoROS2Interface = None
+    sanitize_and_clamp_twist = None
 
-# ==============================================================================
-# GLOBAL KINEMATIC BOUNDARIES & METROLOGICAL PARAMETERS
-# ==============================================================================
-V_MAX = 0.50                   # Maximum linear velocity (m/s)
-W_MAX = 1.00                   # Maximum angular velocity (rad/s)
-X_MAX = 5.0                    # Arena spatial boundary X (m)
-Y_MAX = 5.0                    # Arena spatial boundary Y (m)
-HALF_TRACK_B = 0.086           # Half-track width b = L/2 (m) for AgileX LIMO
+_CFG = load_config()
+_KIN = _CFG["kinematics"]
+_DOCK = _CFG["docking_and_iso"]
+_NET = _CFG["network_and_training"]
 
-DEFAULT_DIST_TOL = 0.08        # 8 cm positioning radius from dock center (m)
-DEFAULT_ANGLE_TOL = 0.26       # ISO 18646-2 Heading orientation tolerance (rad) ~ 15.0 deg
-DEFAULT_DWELL_TIME = 30.0      # Required continuous stationary duration at dock (s)
-DEFAULT_MAX_DURATION = 150.0   # Extended mission ceiling to accommodate navigation + dwell (s)
-# ==============================================================================
+V_MAX = float(_KIN["v_max"])
+W_MAX = float(_KIN["w_max"])
+X_MAX = float(_KIN["x_max"])
+Y_MAX = float(_KIN["y_max"])
+HALF_TRACK_B = float(_KIN["half_track_b"])
+
+DEFAULT_DIST_TOL = float(_DOCK["dist_tol"])
+DEFAULT_ANGLE_TOL = float(_DOCK["angle_tol"])
+DEFAULT_DWELL_TIME = float(_DOCK["dwell_time"])
+DEFAULT_MAX_DURATION = float(_DOCK["max_duration"])
+
+DEFAULT_WEIGHTS_DIFF = "models/supervised_w_torch_diff.json"
+DEFAULT_WEIGHTS_MECANUM = _NET["weights_path"]
 
 
 def compute_se2_distance(dx: float, dy: float, dtheta: float, b: float = HALF_TRACK_B) -> Tuple[float, float]:
     """
     Computes both Euclidean Cartesian distance and SE(2) composite pose distance.
-
-    Args:
-        dx (float): Longitudinal error in meters.
-        dy (float): Lateral error in meters.
-        dtheta (float): Heading error in radians [-pi, pi].
-        b (float): Characteristic half-track radius in meters.
-
-    Returns:
-        Tuple[float, float]: (d_xy, d_pose) in meters.
     """
     d_xy = math.hypot(dx, dy)
     d_pose = math.hypot(d_xy, b * dtheta)
     return d_xy, d_pose
 
 
-DEFAULT_WEIGHTS_DIFF = "models/supervised_w_torch_diff.json"
-DEFAULT_WEIGHTS_MECANUM = "models/pioneer_mecanum_weights.json"
+def clamp_mecanum_velocity(
+    vx: float,
+    vy: float,
+    w: float,
+    v_max_eff: float = V_MAX,
+    w_max_eff: float = W_MAX,
+) -> Tuple[float, float, float]:
+    """
+    Sanitizes (vx, vy, w) against NaN/Inf and enforces Euclidean vector norm
+    sqrt(vx^2 + vy^2) <= v_max_eff so diagonal speed never exceeds v_max_eff.
+    """
+    if not (math.isfinite(vx) and math.isfinite(vy) and math.isfinite(w)):
+        return 0.0, 0.0, 0.0
+    v_mag = math.hypot(vx, vy)
+    if v_mag > v_max_eff and v_mag > 0.0:
+        scale = v_max_eff / v_mag
+        vx *= scale
+        vy *= scale
+    w = max(-w_max_eff, min(w_max_eff, w))
+    return vx, vy, w
 
 
 def run_autonomous_session(
-    weights_path: Optional[str],
-    target: List[float],
+    weights_path: Optional[str] = None,
+    target: Optional[List[float]] = None,
     teleport_to: Optional[List[float]] = None,
     is_real: bool = False,
-    max_duration: float = DEFAULT_MAX_DURATION,
-    dist_tol: float = DEFAULT_DIST_TOL,
-    angle_tol: float = DEFAULT_ANGLE_TOL,
-    dwell_time_required: float = DEFAULT_DWELL_TIME,
+    max_duration: Optional[float] = None,
+    dist_tol: Optional[float] = None,
+    angle_tol: Optional[float] = None,
+    dwell_time_required: Optional[float] = None,
     output_dir: str = "data/evaluation",
     odom_topic: Optional[str] = None,
-    cmd_vel_topic: str = "/cmd_vel",
-    speed_scale: float = 1.0,
-    mode: str = "mecanum"
+    cmd_vel_topic: Optional[str] = None,
+    speed_scale: Optional[float] = None,
+    mode: str = "mecanum",
+    config_path: Optional[str] = None,
 ) -> bool:
     """
     Orchestrates a closed-loop autonomous docking trial with stationary dwell verification.
-
-    Args:
-        weights_path (str): Path to trained neural network weights JSON.
-        target (List[float]): Target pose [x_target, y_target, theta_target].
-        teleport_to (Optional[List[float]]): Starting pose [x0, y0, th0] for Gazebo teleportation.
-        is_real (bool): True for hardware deployment, False for Gazebo simulation.
-        max_duration (float): Maximum trial duration before timeout (s).
-        dist_tol (float): Positioning tolerance radius from dock center (m).
-        angle_tol (float): Heading tolerance at dock (rad).
-        dwell_time_required (float): Required continuous stationary dwell duration (s).
-        output_dir (str): Root directory for telemetry logs and trajectory plots.
-        odom_topic (Optional[str]): Odometry topic name (default: auto-detects /odom or /wheel/odom).
-        cmd_vel_topic (str): Velocity command topic name (default: /cmd_vel).
-        speed_scale (float): Velocity multiplier in [0.2, 1.0] for comfortable physical testing.
-
-    Returns:
-        bool: True if stable docking with verified dwell was achieved, False otherwise.
     """
     if not ROS2_AVAILABLE:
         raise RuntimeError("ROS 2 Humble / Foxy environment is required for live autonomous execution.")
+
+    cfg = load_config(config_path)
+    kin_cfg = cfg["kinematics"]
+    dock_cfg = cfg["docking_and_iso"]
+    net_cfg = cfg["network_and_training"]
+    ros_cfg = cfg["ros2_and_safety"]
 
     is_mecanum = (mode == "mecanum")
     if weights_path is None:
         weights_path = DEFAULT_WEIGHTS_MECANUM if is_mecanum else DEFAULT_WEIGHTS_DIFF
     output_size = 3 if is_mecanum else 2
 
-    # Kinematic limits: scale linear velocity if desired, but maintain full W_MAX for 4WD rubber tire ground torque
-    eff_scale = max(0.2, min(1.0, float(speed_scale)))
-    v_max_effective = V_MAX * eff_scale
-    w_max_effective = W_MAX  # Maintain full steering torque against tire ground friction
+    target = target if target is not None else [0.0, 0.0, 0.0]
+    max_duration = float(max_duration if max_duration is not None else dock_cfg["max_duration"])
+    dist_tol = float(dist_tol if dist_tol is not None else dock_cfg["dist_tol"])
+    angle_tol = float(angle_tol if angle_tol is not None else dock_cfg["angle_tol"])
+    dwell_time_required = float(dwell_time_required if dwell_time_required is not None else dock_cfg["dwell_time"])
+    odom_topic = odom_topic if odom_topic is not None else ros_cfg["odom_topic"]
+    cmd_vel_topic = cmd_vel_topic if cmd_vel_topic is not None else ros_cfg["cmd_vel_topic"]
+    eff_scale, v_max_effective, w_max_effective = effective_speed_limits(cfg, speed_scale)
+    dt = float(kin_cfg["dt"])
+    win_n = int(dock_cfg["window_samples"])
 
     print("\n" + "=" * 78)
     print("   AGILEX LIMO CLOSED-LOOP AUTONOMOUS DOCKING (ISO 18646-2 BENCHMARK)")
@@ -161,31 +153,36 @@ def run_autonomous_session(
     print(f"Weights Artifact     : {weights_path}")
     print(f"Dock Target [x,y,θ]  : x={target[0]:.3f} m, y={target[1]:.3f} m, θ={math.degrees(target[2]):.1f}°")
     print(f"Platform Mode        : {'Physical LIMO Hardware' if is_real else 'Gazebo Simulation'}")
-    print(f"Cruise Limits        : V_max = {v_max_effective:.2f} m/s | W_max = {w_max_effective:.2f} rad/s (Scale: {eff_scale*100:.0f}%)")
+    print(f"Cruise Limits        : ||V||_max = {v_max_effective:.2f} m/s | W_max = {w_max_effective:.2f} rad/s (Scale: {eff_scale*100:.0f}%)")
     print(f"Capture Threshold    : Distance <= {dist_tol * 100:.1f} cm | Angle <= {math.degrees(angle_tol):.1f}°")
     print(f"Stationary Dwell     : {dwell_time_required:.1f} s continuous immobilization")
     print(f"Mission Duration Max : {max_duration:.1f} s")
     print("=" * 78 + "\n")
 
-    # 1. Initialize Neural Network Policy
-    model = PioneerNN(input_size=3, hidden_size=1000, output_size=output_size, use_bias=True)
+    model = PioneerNN(
+        input_size=int(net_cfg["input_size"]),
+        hidden_size=int(net_cfg["hidden_size"]),
+        output_size=output_size,
+        use_bias=bool(net_cfg["use_bias"]),
+    )
     model.load_from_json_file(weights_path)
     model.eval()
     print(f"[PioneerNN] Policy loaded from: {weights_path} (mode={mode}, output_size={output_size}, use_bias={model.use_bias})")
 
-    # 2. Initialize ROS 2 Node & Hardware / Gazebo Interface
     rclpy.init()
     robot = LimoROS2Interface(safety_limits=is_real, odom_topic=odom_topic, cmd_vel_topic=cmd_vel_topic)
     logger = DataLogger()
 
-    # Initial repositioning / teleportation
     init_pos = robot.get_position()
     init_dist = math.hypot(init_pos[0] - target[0], init_pos[1] - target[1])
     print(f"[Odometry] Current robot pose: x={init_pos[0]:.3f} m, y={init_pos[1]:.3f} m, theta={math.degrees(init_pos[2]):.1f}° (Distance to target: {init_dist:.2f} m)")
 
     if teleport_to is not None and not is_real:
         print(f"[Gazebo] Teleporting robot to starting pose: {teleport_to}")
-        robot.teleport_gazebo(teleport_to[0], teleport_to[1], teleport_to[2])
+        if not robot.teleport_gazebo(teleport_to[0], teleport_to[1], teleport_to[2]):
+            robot.cleanup()
+            rclpy.shutdown()
+            raise RuntimeError(f"Gazebo teleportation to {teleport_to} failed; aborting run to prevent invalid pose telemetry.")
         time.sleep(0.4)
     elif teleport_to is not None and is_real:
         print(f"[Hardware] Calibrating physical starting pose relative to target: {teleport_to}")
@@ -193,11 +190,13 @@ def run_autonomous_session(
         time.sleep(0.2)
     elif init_dist < dist_tol and not is_real:
         print("[Notice] Robot initialized inside dock. Teleporting to default benchmark starting pose [2.0, 2.0, 0.0]...")
-        robot.teleport_gazebo(2.0, 2.0, 0.0)
+        if not robot.teleport_gazebo(2.0, 2.0, 0.0):
+            robot.cleanup()
+            rclpy.shutdown()
+            raise RuntimeError("Gazebo teleportation to [2.0, 2.0, 0.0] failed; aborting run.")
         time.sleep(0.4)
     elif init_dist < dist_tol and is_real:
         print(f"[Warning] Robot is already at the dock ({init_dist*100:.1f} cm <= {dist_tol*100:.1f} cm).")
-        print("Drive the robot to your desired starting position before launching, or check if /odom is zeroed at the start position.")
 
     if is_real:
         try:
@@ -210,10 +209,9 @@ def run_autonomous_session(
 
     success = False
     start_time = time.time()
-    dt = 0.050  # 20 Hz loop period
     dwell_timer = 0.0
     dock_arrival_announced = False
-    pos_window: collections.deque[Tuple[float, float, float, float]] = collections.deque(maxlen=20)  # 1-second window
+    pos_window: collections.deque[Tuple[float, float, float, float]] = collections.deque(maxlen=win_n)
 
     try:
         while rclpy.ok():
@@ -222,7 +220,17 @@ def run_autonomous_session(
                 print(f"\n[Timeout] Maximum mission duration reached ({max_duration:.1f} s).")
                 break
 
+            if not robot.is_odom_healthy():
+                robot.stop()
+                print("\n[Safety Watchdog] Odometry stream frozen or invalid (NaN/stale)! Emergency stop triggered.")
+                break
+
             pos = robot.get_position()
+            if len(pos) < 3 or not all(math.isfinite(float(p)) for p in pos[:3]):
+                robot.stop()
+                print("\n[Safety Watchdog] Non-finite pose received! Emergency stop triggered.")
+                break
+
             dx = target[0] - pos[0]
             dy = target[1] - pos[1]
             thr = recast_angle(pos[2])
@@ -230,50 +238,56 @@ def run_autonomous_session(
 
             dist_xy, dist_pose = compute_se2_distance(dx, dy, e_theta)
 
-            # Robot-centric relative target coordinates
             x_target_robot = dx * math.cos(thr) + dy * math.sin(thr)
             y_target_robot = -dx * math.sin(thr) + dy * math.cos(thr)
 
-            # Normalized inputs in [-1.0, +1.0] (relative to dock target)
             in_0 = max(-1.0, min(1.0, x_target_robot / X_MAX))
             in_1 = max(-1.0, min(1.0, y_target_robot / Y_MAX))
             in_2 = max(-1.0, min(1.0, e_theta / math.pi))
-
             cost = in_0 ** 2 + in_1 ** 2 + in_2 ** 2
 
-            # Neural network inference (3 canonical inputs)
             cmd_raw = model([in_0, in_1, in_2])
             if is_mecanum:
                 out_vx = float(cmd_raw[0])
                 out_vy = float(cmd_raw[1])
                 out_w = float(cmd_raw[2])
-                v_cmd = max(-v_max_effective, min(v_max_effective, out_vx * v_max_effective))
-                vy_cmd = max(-v_max_effective, min(v_max_effective, out_vy * v_max_effective))
-                w_cmd = max(-w_max_effective, min(w_max_effective, out_w * w_max_effective))
+                if not (math.isfinite(out_vx) and math.isfinite(out_vy) and math.isfinite(out_w)):
+                    robot.stop()
+                    break
+                v_cmd, vy_cmd, w_cmd = clamp_mecanum_velocity(
+                    vx=out_vx * v_max_effective,
+                    vy=out_vy * v_max_effective,
+                    w=out_w * w_max_effective,
+                    v_max_eff=v_max_effective,
+                    w_max_eff=w_max_effective,
+                )
             else:
                 out_v = float(cmd_raw[0])
                 out_w = float(cmd_raw[1])
-                v_cmd = max(-v_max_effective, min(v_max_effective, out_v * v_max_effective))
-                vy_cmd = 0.0
-                w_cmd = max(-w_max_effective, min(w_max_effective, out_w * w_max_effective))
+                if not (math.isfinite(out_v) and math.isfinite(out_w)):
+                    robot.stop()
+                    break
+                v_cmd, vy_cmd, w_cmd = clamp_mecanum_velocity(
+                    vx=out_v * v_max_effective,
+                    vy=0.0,
+                    w=out_w * w_max_effective,
+                    v_max_eff=v_max_effective,
+                    w_max_eff=w_max_effective,
+                )
 
-            # Track 1-second displacement window for physical immobilization verification
             pos_window.append((elapsed, pos[0], pos[1], pos[2]))
-            if len(pos_window) >= 20:
-                t_old, x_old, y_old, th_old = pos_window[0]
-                d_moved_window = math.hypot(pos[0] - x_old, pos[1] - y_old)
-                d_rot_window = abs(recast_angle(pos[2] - th_old))
-            else:
-                d_moved_window = 0.0
-                d_rot_window = 0.0
 
-            # Velocity-level and physical immobilization criteria
-            is_stopped_cmds = (abs(v_cmd) < 0.06 and abs(vy_cmd) < 0.06 and abs(w_cmd) < 0.06)
-            is_stopped_motion = (len(pos_window) >= 20 and d_moved_window < 0.010 and d_rot_window < 0.03)
-            is_stationary = is_stopped_cmds or is_stopped_motion
-
-            # Docking Zone Arrival & Continuous Dwell-Time Watchdog (ISO 18646-2)
-            in_dock_envelope = (dist_xy <= dist_tol and abs(e_theta) <= angle_tol)
+            in_dock_envelope, is_stationary = check_docking_and_stationarity(
+                dist_xy=dist_xy,
+                e_theta=e_theta,
+                v_cmd=v_cmd,
+                w_cmd=w_cmd,
+                pos_window=pos_window,
+                dist_tol=dist_tol,
+                angle_tol=angle_tol,
+                vy_cmd=vy_cmd,
+                cfg=cfg,
+            )
 
             if in_dock_envelope:
                 if not dock_arrival_announced:
@@ -297,7 +311,6 @@ def run_autonomous_session(
                     print(f"[Notice] Dwell reset! Motion or boundary departure detected at t={elapsed:.1f}s (d={dist_xy*100:.1f}cm).")
                 dwell_timer = 0.0
 
-            # Diagnostics telemetry output every 1.0 second
             if int(elapsed / dt) % 20 == 0:
                 if is_mecanum:
                     print(f"t={elapsed:5.1f}s | Dist: {dist_xy:5.3f}m | SE(2): {dist_pose:5.3f}m | Head: {math.degrees(abs(e_theta)):5.1f}° | vx: {v_cmd:+5.2f} | vy: {vy_cmd:+5.2f} | w: {w_cmd:+5.2f}")
@@ -362,8 +375,10 @@ def run_autonomous_session(
                 "half_track_b_m": HALF_TRACK_B,
             },
             "kinematics": {
-                "v_max_mps": V_MAX,
-                "w_max_radps": W_MAX,
+                "speed_scale": eff_scale,
+                "v_max_nominal_mps": V_MAX,
+                "v_max_effective_mps": v_max_effective,
+                "w_max_radps": w_max_effective,
                 "x_max_m": X_MAX,
                 "y_max_m": Y_MAX,
                 "dt_sec": dt,
@@ -390,19 +405,19 @@ def run_autonomous_session(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Closed-Loop Autonomous Positioning & Metrological Docking.")
-    parser.add_argument("--mode", choices=["diff", "mecanum"], default="mecanum", help="Kinematic mode: 'mecanum' (3 outputs, default) or 'diff' (2 outputs)")
-    parser.add_argument("--weights", type=str, default=None, help="Path to synaptic weights JSON (auto-selected by --mode if omitted)")
+    parser.add_argument("--mode", choices=["diff", "mecanum"], default="mecanum", help="Kinematic mode: 'mecanum' (default) or 'diff'")
+    parser.add_argument("--weights", type=str, default=None, help="Path to synaptic weights JSON")
     parser.add_argument("--target", nargs=3, type=float, default=[0.0, 0.0, 0.0], help="Target pose x y theta")
     parser.add_argument("--teleport-to", "--start", nargs=3, type=float, default=None, dest="teleport_to", help="Starting pose x y theta")
     parser.add_argument("--real", action="store_true", help="Physical hardware mode with hardware safety limits")
-    parser.add_argument("--max-time", type=float, default=DEFAULT_MAX_DURATION, help=f"Maximum duration ceiling (default: {DEFAULT_MAX_DURATION}s)")
-    parser.add_argument("--dist-tol", type=float, default=DEFAULT_DIST_TOL, help=f"Docking positioning tolerance (default: {DEFAULT_DIST_TOL}m)")
-    parser.add_argument("--angle-tol", type=float, default=DEFAULT_ANGLE_TOL, help=f"Docking orientation tolerance (default: {DEFAULT_ANGLE_TOL}rad)")
-    parser.add_argument("--dwell-time", type=float, default=DEFAULT_DWELL_TIME, help=f"Required stationary dwell time at dock (default: {DEFAULT_DWELL_TIME}s)")
+    parser.add_argument("--max-time", type=float, default=None, help="Maximum duration ceiling (s)")
+    parser.add_argument("--dist-tol", type=float, default=None, help="Docking positioning tolerance (m)")
+    parser.add_argument("--angle-tol", type=float, default=None, help="Docking orientation tolerance (rad)")
+    parser.add_argument("--dwell-time", type=float, default=None, help="Required stationary dwell time at dock (s)")
     parser.add_argument("--outdir", type=str, default="data/evaluation", help="Destination telemetry directory")
-    parser.add_argument("--odom-topic", type=str, default=None, help="Odometry topic name (default: auto-detects /odom or /wheel/odom)")
-    parser.add_argument("--cmd-vel-topic", type=str, default="/cmd_vel", help="Command velocity topic name (default: /cmd_vel)")
-    parser.add_argument("--speed-scale", type=float, default=1.0, help="Velocity scaling multiplier in [0.2, 1.0] (e.g. 0.6 or 0.7 for smoother testing)")
+    parser.add_argument("--odom-topic", type=str, default=None, help="Odometry topic name")
+    parser.add_argument("--cmd-vel-topic", type=str, default=None, help="Command velocity topic name")
+    parser.add_argument("--speed-scale", type=float, default=None, help="Override kinematics.speed_scale from config.json (clamped to [0.2, 1.0])")
     args = parser.parse_args()
 
     run_autonomous_session(
@@ -418,5 +433,5 @@ if __name__ == "__main__":
         odom_topic=args.odom_topic,
         cmd_vel_topic=args.cmd_vel_topic,
         speed_scale=args.speed_scale,
-        mode=args.mode
+        mode=args.mode,
     )

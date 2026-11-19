@@ -1,21 +1,20 @@
 """
 Holonomic Mecanum Offline Dataset Generator for Mobile Robot Docking
 =====================================================================
-Generates a separate 6-column supervisory training dataset for offline
+Generates a 6-column supervisory training dataset for offline
 behavioral cloning of a 3-output holonomic controller (vx, vy, w) on the
 AgileX LIMO mobile robot in Mecanum mode.
 
-Does NOT modify any existing differential-drive files or datasets.
-
-Coordinate System & Schema:
----------------------------
-Robot-Centric Body Frame representation (6 columns):
-    1. x_target_robot : Relative X coordinate of the dock in robot body frame (m)
-    2. y_target_robot : Relative Y coordinate of the dock in robot body frame (m)
-    3. theta_robot    : Heading error relative to the dock axis [-pi, +pi] (rad)
-    4. vx_robot       : Supervisory longitudinal velocity [-V_MAX, +V_MAX] (m/s)
-    5. vy_robot       : Supervisory lateral (strafe) velocity [-V_MAX, +V_MAX] (m/s)
-    6. w_robot        : Supervisory yaw angular velocity [-W_MAX, +W_MAX] (rad/s)
+Key Improvements:
+-----------------
+1. Restorative Deceleration Inside 8 cm: The linear and angular braking ramps
+   converge all the way to the inner core (d_stop_internal = 1.2 cm, angle = 1.1 deg)
+   rather than vanishing at the 8 cm test boundary.
+2. Continuous Turning Law at +/-180 deg: Smooth CCW symmetry breaking near +/-pi
+   eliminating sign-flipping chattering.
+3. Stratified Distance-Band Sampling: Balances near-dock, braking ring, and far-field
+   samples across all 360 degrees.
+4. Centralized Configuration: Reads defaults from `config.json`.
 
 Project: LIMO Offline Learning (CERV / Lab-STICC / ENIB)
 Standards: ROS REP-103 & ISO 18646-2
@@ -29,29 +28,41 @@ import csv
 import math
 import random
 import argparse
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
-# Dynamic project root resolution
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-# ==============================================================================
-# KINEMATIC AND ARENA PARAMETERS (AgileX LIMO Mecanum Holonomic Kinematics)
-# ==============================================================================
-V_MAX = 0.50                   # Maximum translational speed sqrt(vx^2 + vy^2) (m/s)
-W_MAX = 1.00                   # Maximum yaw angular velocity (rad/s)
-X_MAX = 5.0                    # Global arena half-width X [-5.0, +5.0] m
-Y_MAX = 5.0                    # Global arena half-length Y [-5.0, +5.0] m
-STEP_XY = 0.20                 # Primary spatial regular grid resolution (m)
-NUM_ANGLES = 24                # Angular resolution: 24 equidistant headings (15° steps)
+from src.core.config import load_config
 
-D_STOP = 0.080                 # Physical dock capture radius for terminal stop (8.0 cm)
-D_STOP_ANGLE_TOL = 0.150       # Heading alignment tolerance for terminal stop (~8.6°)
-D_BRAKE = 0.40                 # Linear deceleration funnel distance (40.0 cm)
-ANGLE_BRAKE = 0.60             # Angular deceleration funnel threshold (rad)
+_CFG = load_config()
+_KIN = _CFG["kinematics"]
+_EXP = _CFG["expert_and_dataset"]
 
-SAMPLES_PER_CLASS = 7500       # 6 classes * 7,500 = 45,000 balanced samples
+# ==============================================================================
+# KINEMATIC AND ARENA PARAMETERS (Loaded from config.json)
+# ==============================================================================
+V_MAX = float(_KIN["v_max"])
+W_MAX = float(_KIN["w_max"])
+X_MAX = float(_KIN["x_max"])
+Y_MAX = float(_KIN["y_max"])
+STEP_XY = float(_EXP["step_xy"])
+NUM_ANGLES = int(_EXP["num_angles"])
+
+D_STOP = float(_EXP["d_stop_outer"])
+D_STOP_INTERNAL = float(_EXP["d_stop_internal"])
+D_STOP_ANGLE_TOL = float(_EXP["d_stop_angle_internal"])
+D_BRAKE = float(_EXP["d_brake"])
+ANGLE_BRAKE = float(_EXP["angle_brake"])
+
+# Expert supervisor thresholds (config.json -> expert_and_dataset)
+RAMP_MIN = float(_EXP["ramp_min"])                # minimum fraction of v_max / w_max on the braking ramps
+SYM_BREAK_THETA = float(_EXP["sym_break_theta"])  # e_theta above this -> consistent CCW alignment (rad)
+CLASS_V_EPS = float(_EXP["class_v_eps"])          # |v| <= this counts as "no translation" (m/s)
+CLASS_W_EPS = float(_EXP["class_w_eps"])          # |w| <= this counts as "no rotation" (rad/s)
+
+SAMPLES_PER_CLASS = int(_EXP["samples_per_class"])
 COLUMNS = [
     "x_target_robot",
     "y_target_robot",
@@ -72,18 +83,14 @@ MECANUM_CLASS_NAMES = {
 
 
 def recast_angle(angle_rad: float) -> float:
-    """Wraps an angle into [-pi, +pi], preserving exact +/-pi boundaries."""
-    if abs(angle_rad - math.pi) < 1e-4:
-        return math.pi
-    if abs(angle_rad + math.pi) < 1e-4:
-        return -math.pi
-    return math.atan2(math.sin(angle_rad), math.cos(angle_rad))
+    """Wraps an angle into (-pi, +pi]."""
+    return math.atan2(math.sin(float(angle_rad)), math.cos(float(angle_rad)))
 
 
 def classify_mecanum_maneuver(vx: float, vy: float, w: float) -> int:
     """Classifies a holonomic command (vx, vy, w) into 6 balanced regimes."""
-    V_EPS = 0.025
-    W_EPS = 0.040
+    V_EPS = CLASS_V_EPS
+    W_EPS = CLASS_W_EPS
     v_mag = math.hypot(vx, vy)
 
     if v_mag <= V_EPS:
@@ -102,60 +109,46 @@ def expert_mecanum_controller(
     theta_r: float,
     v_max: float = V_MAX,
     w_max: float = W_MAX,
-    d_stop: float = D_STOP,
+    d_stop: float = D_STOP_INTERNAL,
     d_stop_angle_tol: float = D_STOP_ANGLE_TOL,
     d_brake: float = D_BRAKE,
     angle_brake: float = ANGLE_BRAKE,
 ) -> Tuple[float, float, float, int]:
     """
     Deterministic holonomic expert supervisor for AgileX LIMO Mecanum mode.
-    Decouples translational approach (vx, vy) from yaw alignment (w) with
-    smooth linear and angular deceleration funnels.
+    Maintains restorative translational and rotational feedback inside the dock
+    zone down to `d_stop_internal` and `d_stop_angle_internal`,
+    with vector norm sqrt(vx^2 + vy^2) <= v_max.
     """
     dist = math.hypot(x_tr, y_tr)
     e_theta = recast_angle(theta_r)
 
-    # 1. Translational command (vx, vy)
+    # 1. Translational command (vx, vy) with restorative ramp down to d_stop (1.2 cm)
     if dist <= d_stop:
         vx, vy = 0.0, 0.0
     else:
         if dist < d_brake:
-            ramp = max(0.0, min(1.0, (dist - d_stop) / (d_brake - d_stop)))
+            ramp = min(1.0, max(RAMP_MIN, dist / d_brake))
             v_mag = v_max * ramp
         else:
             v_mag = v_max
         vx = v_mag * (x_tr / dist)
         vy = v_mag * (y_tr / dist)
 
-    # 2. Angular command (w)
+    # 2. Angular command (w) with restorative alignment down to 0.02 rad and smooth +/-pi handling
     if abs(e_theta) <= d_stop_angle_tol:
         w = 0.0
-    elif abs(abs(e_theta) - math.pi) < 1e-4:
-        # Consistent CCW symmetry breaking at +/-pi
+    elif e_theta > SYM_BREAK_THETA:
         w = w_max
     else:
         if abs(e_theta) < angle_brake:
-            ramp_w = max(0.0, min(1.0, (abs(e_theta) - d_stop_angle_tol) / (angle_brake - d_stop_angle_tol)))
+            ramp_w = min(1.0, max(RAMP_MIN, abs(e_theta) / angle_brake))
         else:
             ramp_w = 1.0
         w = (-w_max if e_theta > 0.0 else w_max) * ramp_w
 
     m_id = classify_mecanum_maneuver(vx, vy, w)
     return vx, vy, w, m_id
-
-
-def _sample_grid(
-    xs: List[float],
-    ys: List[float],
-    thetas: List[float],
-    buckets: Dict[int, List[List[float]]],
-) -> None:
-    """Evaluates the expert controller on a Cartesian-angular grid."""
-    for x in xs:
-        for y in ys:
-            for th in thetas:
-                vx, vy, w, m_id = expert_mecanum_controller(x, y, th)
-                buckets[m_id].append([x, y, th, vx, vy, w])
 
 
 def generate_mecanum_dataset(
@@ -168,100 +161,126 @@ def generate_mecanum_dataset(
     """
     Constructs a stratified, bilaterally symmetric 3-output holonomic dataset.
     """
-    raw_by_class: Dict[int, List[List[float]]] = {i: [] for i in range(1, 7)}
+    banded_pools: Dict[int, Dict[int, Dict[Tuple[float, float, float], List[float]]]] = {
+        m_id: {0: {}, 1: {}, 2: {}} for m_id in range(1, 7)
+    }
 
-    # 1. Primary 5x5m spatial grid
+    def _add_sample(x: float, y: float, th: float) -> None:
+        th_w = recast_angle(th)
+        vx, vy, w, m_id = expert_mecanum_controller(x, y, th_w)
+        dist = math.hypot(x, y)
+        band = 0 if dist <= D_STOP else (1 if dist <= 0.80 else 2)  # 0.80 m: sampling band limit
+        key = (round(x, 4), round(y, 4), round(th_w, 4))
+        if key not in banded_pools[m_id][band]:
+            banded_pools[m_id][band][key] = [key[0], key[1], key[2], round(vx, 4), round(vy, 4), round(w, 4)]
+
+        if abs(abs(th_w) - math.pi) > 1e-3:
+            my = -y
+            mth = recast_angle(-th_w)
+            mvx, mvy, mw, mm_id = expert_mecanum_controller(x, my, mth)
+            mkey = (round(x, 4), round(my, 4), round(mth, 4))
+            if mkey not in banded_pools[mm_id][band]:
+                banded_pools[mm_id][band][mkey] = [mkey[0], mkey[1], mkey[2], round(mvx, 4), round(mvy, 4), round(mw, 4)]
+
+    # 1. Primary 5x5m spatial grid (includes th=0 and fine aligned headings for Class 4)
     n_steps_x = int(round(2.0 * x_max / step_xy))
     n_steps_y = int(round(2.0 * y_max / step_xy))
     xs = [round(-x_max + i * step_xy, 2) for i in range(n_steps_x + 1)]
     ys = [round(-y_max + i * step_xy, 2) for i in range(n_steps_y + 1)]
-    thetas = [round(-math.pi + i * (2.0 * math.pi / num_angles), 4) for i in range(num_angles + 1)]
-    _sample_grid(xs, ys, thetas, raw_by_class)
+    thetas = [round(-math.pi + i * (2.0 * math.pi / num_angles), 4) for i in range(num_angles)] + [
+        round(-D_STOP_ANGLE_TOL + i * (2.0 * D_STOP_ANGLE_TOL / 6), 4) for i in range(7)
+    ]
+    for x in xs:
+        for y in ys:
+            for th in thetas:
+                _add_sample(x, y, th)
 
-    # 2. High-density terminal docking sub-grid (|x|, |y| <= 0.08m, 2mm step, 64 angles)
-    dock_step = 0.0020
+    # 2. High-density terminal docking core (|x|, |y| <= 0.08m, 4mm step, 48 angles)
+    dock_step = 0.0040
     n_dock = int(round(0.16 / dock_step))
     dock_xs = [round(-0.08 + i * dock_step, 4) for i in range(n_dock + 1)]
     dock_ys = [round(-0.08 + i * dock_step, 4) for i in range(n_dock + 1)]
-    dock_thetas = [round(-math.pi + i * (2.0 * math.pi / 64), 4) for i in range(65)]
-    _sample_grid(dock_xs, dock_ys, dock_thetas, raw_by_class)
+    dock_thetas = [round(-math.pi + i * (2.0 * math.pi / 48), 4) for i in range(48)]
+    for x in dock_xs:
+        for y in dock_ys:
+            for th in dock_thetas:
+                _add_sample(x, y, th)
 
-    # 3. Medium-density braking & approach ring (|x|, |y| <= 0.60m, 2cm step, 32 angles)
-    ring_xs = [round(-0.60 + i * 0.02, 3) for i in range(61)]
-    ring_ys = [round(-0.60 + i * 0.02, 3) for i in range(61)]
-    ring_thetas = [round(-math.pi + i * (2.0 * math.pi / 32), 4) for i in range(33)]
-    _sample_grid(ring_xs, ring_ys, ring_thetas, raw_by_class)
+    # 2b. Ultra-fine inner stop core (|x|, |y| <= D_STOP_INTERNAL, |th| <= D_STOP_ANGLE_TOL)
+    core_xs = [round(-D_STOP_INTERNAL + i * (2.0 * D_STOP_INTERNAL / 16), 4) for i in range(17)]
+    core_ys = [round(-D_STOP_INTERNAL + i * (2.0 * D_STOP_INTERNAL / 16), 4) for i in range(17)]
+    core_ths = [round(-D_STOP_ANGLE_TOL + i * (2.0 * D_STOP_ANGLE_TOL / 20), 4) for i in range(21)]
+    for x in core_xs:
+        for y in core_ys:
+            for th in core_ths:
+                _add_sample(x, y, th)
 
-    # 4. Bilateral sagittal mirroring: (x, -y, -theta, vx, -vy, -w)
-    mirrored_by_class: Dict[int, List[List[float]]] = {i: [] for i in range(1, 7)}
-    for m_id in range(1, 7):
-        for s in raw_by_class[m_id]:
-            if abs(abs(s[2]) - math.pi) < 1e-3:
-                continue
-            mx, my = s[0], -s[1]
-            mth = recast_angle(-s[2])
-            mvx, mvy, mw = s[3], -s[4], -s[5]
-            new_id = classify_mecanum_maneuver(mvx, mvy, mw)
-            mirrored_by_class[new_id].append([mx, my, mth, mvx, mvy, mw])
-    for m_id in range(1, 7):
-        raw_by_class[m_id].extend(mirrored_by_class[m_id])
+    # 3. Medium-density braking & approach ring (|x|, |y| <= 0.80m, 4cm step, 32 angles)
+    ring_xs = [round(-0.80 + i * 0.04, 3) for i in range(41)]
+    ring_ys = [round(-0.80 + i * 0.04, 3) for i in range(41)]
+    ring_thetas = [round(-math.pi + (i + 0.5) * (2.0 * math.pi / 32), 4) for i in range(32)]
+    for x in ring_xs:
+        for y in ring_ys:
+            for th in ring_thetas:
+                _add_sample(x, y, th)
 
-    # 5. Periodic boundary sewing at +/-pi
-    for m_id in range(1, 7):
-        sewn = []
-        for s in raw_by_class[m_id]:
-            if abs(s[2] - (-math.pi)) < 1e-3:
-                sewn.append([s[0], s[1], round(math.pi, 4), s[3], s[4], s[5]])
-            elif abs(s[2] - math.pi) < 1e-3:
-                sewn.append([s[0], s[1], round(-math.pi, 4), s[3], s[4], s[5]])
-        raw_by_class[m_id].extend(sewn)
-
-    # 6. Deduplication by state and stratified balancing
+    # 4. Stratified balancing across distance bands
     balanced: List[List[float]] = []
     final_counts: Dict[int, int] = {}
-    random.seed(42)
 
     for m_id in range(1, 7):
-        unique_map = {}
-        for s in raw_by_class[m_id]:
-            key = (round(s[0], 4), round(s[1], 4), round(s[2], 4))
-            if key not in unique_map:
-                unique_map[key] = [
-                    key[0], key[1], key[2],
-                    round(s[3], 4), round(s[4], 4), round(s[5], 4),
-                ]
-        pool = list(unique_map.values())
-        random.seed(42 + m_id)
-        if len(pool) >= samples_per_class:
-            selected = random.sample(pool, samples_per_class)
-        else:
-            selected = list(pool)
+        rng = random.Random(42 + m_id)
+        band_lists = [list(banded_pools[m_id][b].values()) for b in (0, 1, 2)]
+        non_empty_bands = [b_list for b_list in band_lists if len(b_list) > 0]
+
+        selected: List[List[float]] = []
+        if non_empty_bands:
+            per_band_quota = samples_per_class // len(non_empty_bands)
+            leftover_pool: List[List[float]] = []
+            for b_list in non_empty_bands:
+                rng.shuffle(b_list)
+                take = min(len(b_list), per_band_quota)
+                selected.extend(b_list[:take])
+                leftover_pool.extend(b_list[take:])
+
+            if len(selected) < samples_per_class and leftover_pool:
+                rng.shuffle(leftover_pool)
+                need = samples_per_class - len(selected)
+                selected.extend(leftover_pool[:need])
+
+            all_unique = [item for b_list in non_empty_bands for item in b_list]
             while len(selected) < samples_per_class:
-                base = random.choice(pool)
-                jx = round(base[0] + random.gauss(0.0, 0.0005), 4)
-                jy = round(base[1] + random.gauss(0.0, 0.0005), 4)
-                jth = round(recast_angle(base[2] + random.gauss(0.0, 0.0005)), 4)
+                base = rng.choice(all_unique)
+                jx = round(base[0] + rng.gauss(0.0, 0.0005), 4)
+                jy = round(base[1] + rng.gauss(0.0, 0.0005), 4)
+                jth = round(recast_angle(base[2] + rng.gauss(0.0, 0.0005)), 4)
                 selected.append([jx, jy, jth, base[3], base[4], base[5]])
 
-        balanced.extend(selected)
-        final_counts[m_id] = len(selected)
+        balanced.extend(selected[:samples_per_class])
+        final_counts[m_id] = len(selected[:samples_per_class])
 
-    random.shuffle(balanced)
+    random.Random(42).shuffle(balanced)
     return balanced, final_counts
 
 
 def build_mecanum_dataset(
-    output_path: str = "data/dataset_mecanum.csv",
-    samples_per_class: int = SAMPLES_PER_CLASS,
+    output_path: Optional[str] = None,
+    samples_per_class: Optional[int] = None,
+    config_path: Optional[str] = None,
 ) -> int:
     """Generates and writes the 6-column Mecanum dataset CSV."""
-    resolved = os.path.abspath(output_path)
+    cfg = load_config(config_path)
+    exp_cfg = cfg["expert_and_dataset"]
+    out_csv = output_path or exp_cfg["dataset_csv"]
+    spc = int(samples_per_class if samples_per_class is not None else exp_cfg["samples_per_class"])
+
+    resolved = out_csv if os.path.isabs(out_csv) else os.path.join(_project_root, out_csv)
     os.makedirs(os.path.dirname(resolved), exist_ok=True)
 
     print("=" * 78)
     print("   LIMO MECANUM HOLONOMIC OFFLINE DATASET GENERATOR (3 OUTPUTS)")
     print("=" * 78)
-    samples, counts = generate_mecanum_dataset(samples_per_class=samples_per_class)
+    samples, counts = generate_mecanum_dataset(samples_per_class=spc)
 
     with open(resolved, mode="w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -277,8 +296,8 @@ def build_mecanum_dataset(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate 3-output Mecanum holonomic dataset.")
-    parser.add_argument("--output", type=str, default="data/dataset_mecanum.csv")
-    parser.add_argument("--samples-per-class", type=int, default=SAMPLES_PER_CLASS)
+    parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--samples-per-class", type=int, default=None)
     args = parser.parse_args()
     build_mecanum_dataset(output_path=args.output, samples_per_class=args.samples_per_class)
 

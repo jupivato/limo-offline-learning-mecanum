@@ -2,7 +2,7 @@
 PioneerNN Neural Controller Architecture
 =========================================
 Nonlinear Multi-Layer Perceptron (MLP) for closed-loop pose positioning 
-and docking of non-holonomic mobile robots (AgileX LIMO / Pioneer 3-DX).
+and docking of non-holonomic and holonomic mobile robots (AgileX LIMO).
 
 Theoretical Framework:
 ----------------------
@@ -15,28 +15,16 @@ Based on the canonical ENIB / CERV / Lab-STICC formulation (Prof. Patrick Hénaf
    providing total translation and rotation invariance with respect to global world frames.
 
 2. Equilibrium & Stationarity Architecture:
-   - Baseline Theoretical Formulation (use_bias = False):
-       y = tanh(W_out * tanh(W_in * x))
-     Because tanh(0) = 0: x = [0, 0, 0]^T ==> y = [0, 0]^T.
-   - Production Formulation (use_bias = True):
-       Incorporates affine synaptic biases to capture non-symmetric turning/friction dynamics,
-       reducing validation MSE loss from ~0.14 down to ~0.07 and optimizing orientation accuracy.
-       Terminal vehicle immobilization at the dock target is strictly enforced by the canonical
-       execution deadband (|v_raw| <= 0.05, |w_raw| <= 0.01 ==> 0.0) and the ISO 18646-2
-       zero-velocity dwell-time hold.
+   - Multiscale hidden representation across all 1,000 hidden units.
+   - Exact stationarity at the origin x = [0, 0, 0]^T ==> y = 0: guaranteed by
+     bias-free layers (tanh(0) = 0) or, with bias, by the output-bias sync
+     b_o = -W_o * tanh(b_h) performed during training.
 
-3. Radial Angular Damping Gain (K_theta):
+3. Radial Angular Damping Gain (K_theta) -- REFERENCE ONLY:
        K_theta(x_R, y_R) = 1.0 - 0.9 * exp(-10 * (x_R^2 + y_R^2)^2) ∈ [0.1, 1.0]
-   This gain serves as an execution-layer post-processing multiplier for angular 
-   velocity (w_cmd = w_raw * K_theta). It smoothly attenuates high-frequency 
-   chassis rotation within the terminal docking radius while preserving agile yaw 
-   rates in the far field. It is NOT fed into the MLP inputs in order to preserve 
-   feature independence.
-
-Compatibility:
---------------
-Implements a dual-backend architecture: Native PyTorch tensor execution with an 
-autonomous pure-Python standard library fallback for headless embedded environments.
+   `compute_k_theta` is kept for documentation/comparison purposes but is NOT
+   applied anywhere in the control loop: execution is 100% pure neural policy
+   (v = out_v * v_max * speed_scale, w = out_w * w_max).
 
 Project: LIMO Offline Learning (CERV / Lab-STICC / ENIB)
 Standards: ROS REP-103 & ISO 18646-2
@@ -52,7 +40,6 @@ import sys
 import math
 from typing import Dict, Any, Union, List, Optional, Tuple
 
-# Resolve project root directory dynamically
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
@@ -64,75 +51,27 @@ TORCH_AVAILABLE = True
 
 def recast_angle(angle_rad: float) -> float:
     """
-    Recasts an arbitrary angle into the canonical principal interval [-pi, +pi].
-    Preserves exact boundary extremes (-pi and +pi) against floating-point rounding artifacts.
-
-    Args:
-        angle_rad (float): Input angle in radians.
-
-    Returns:
-        float: Equivalent angle wrapped in [-pi, +pi].
+    Recasts an arbitrary angle into the canonical principal interval (-pi, +pi].
     """
-    if abs(angle_rad - math.pi) < 1e-4:
-        return math.pi
-    if abs(angle_rad + math.pi) < 1e-4:
-        return -math.pi
-    return math.atan2(math.sin(angle_rad), math.cos(angle_rad))
+    return math.atan2(math.sin(float(angle_rad)), math.cos(float(angle_rad)))
 
 
 def compute_theta_strategic(x: float, y: float) -> float:
     """
     Computes the canonical ENIB strategic approach orientation theta_s(x, y).
-
-    Mathematical Formulation:
-        theta_s(x, y) = tanh(10.0 * x) * atan(1.0 * y)
-
-    Kinematic and Control Properties:
-    - Eliminates directional symmetry ambiguities and local minima in the plane.
-    - Guides the mobile robot tangentially along the longitudinal docking corridor
-      as (x, y) -> (0, 0), preventing orbital limit cycles and awkward sideways docking.
-    - Bound: theta_s in (-pi/2, +pi/2).
-
-    Args:
-        x (float): Relative X coordinate of the target in the robot body frame (m).
-        y (float): Relative Y coordinate of the target in the robot body frame (m).
-
-    Returns:
-        float: Strategic heading reference angle in radians.
     """
     return math.tanh(10.0 * float(x)) * math.atan(1.0 * float(y))
 
 
 def compute_k_theta(x_r: float, y_r: float) -> float:
     """
-    Computes the radial angular velocity damping gain K_theta.
-
-    Mathematical Formulation:
-        K_theta(x_R, y_R) = 1.0 - 0.9 * exp(-10.0 * (x_R^2 + y_R^2)^2)
-
-    Physical Interpretation:
-    - At the docking terminal (x_R=0, y_R=0): exp(0) = 1 ==> K_theta = 1 - 0.9 = 0.1
-    - At the far field (r^2 -> infinity)     : exp(...) -> 0 ==> K_theta -> 1.0
-    - Strict Boundedness: K_theta in [0.1, 1.0]
-
-    Application:
-    Used as an execution-layer post-filter on angular velocity:
-        w_cmd = w_discrete * K_theta(x_R, y_R)
-    Provides a 90% smooth reduction of turning jerk within the terminal docking
-    radius (r < 0.5m) while allowing full pivot capability far from the dock.
-
-    Args:
-        x_r (float): Target relative X position in robot body coordinates (m).
-        y_r (float): Target relative Y position in robot body coordinates (m).
-
-    Returns:
-        float: Attenuation factor clamped in [0.1, 1.0].
+    Computes the radial angular velocity damping gain K_theta in [0.1, 1.0].
+    Reference only: not used by the execution / benchmark control loops.
     """
     try:
         r2 = float(x_r) ** 2 + float(y_r) ** 2
         r4 = r2 ** 2
         arg = -10.0 * r4
-        # Numerical safeguard against IEEE-754 underflow/overflow
         if arg < -50.0:
             arg = -50.0
         elif arg > 0.0:
@@ -146,7 +85,6 @@ def compute_k_theta(x_r: float, y_r: float) -> float:
 class ReplayBuffer:
     """
     Transition replay buffer for mobile robot reinforcement and imitation learning.
-    Stores tuples of (state, action, reward, next_state, done).
     """
 
     def __init__(self, capacity: int = 100000):
@@ -161,11 +99,9 @@ class ReplayBuffer:
         next_state: Union[List[float], Any],
         done: bool
     ) -> None:
-        """Appends a transition tuple to the buffer."""
         self.buffer.append((list(state), list(action), float(reward), list(next_state), bool(done)))
 
     def sample(self, batch_size: int) -> Dict[str, Any]:
-        """Samples a uniform random mini-batch of transitions."""
         batch = random.sample(self.buffer, min(len(self.buffer), batch_size))
         states, actions, rewards, next_states, dones = zip(*batch)
         return {
@@ -184,7 +120,7 @@ class ReplayBuffer:
 
 
 class DummyTensor(list):
-    """Tensor-compatible list container for the pure-Python fallback execution."""
+    """Tensor-compatible list container for pure-Python fallback execution."""
     def squeeze(self):
         return self
 
@@ -203,13 +139,6 @@ else:
 class PioneerNN(BaseNN):
     """
     PioneerNN Multi-Layer Perceptron (MLP) for Mobile Robot Velocity Control.
-
-    Canonical Specifications:
-    - input_size  : 3 normalized body-frame features:
-                    [x_R / X_MAX, y_R / Y_MAX, recast(theta_R - theta_T) / pi]
-    - hidden_size : 1000 dense units with Tanh activation
-    - output_size : 2 normalized velocity setpoints [v_norm, w_norm] with Tanh activation
-    - use_bias    : True (default for production weights with optimal MSE and Ao)
     """
 
     def __init__(
@@ -217,17 +146,8 @@ class PioneerNN(BaseNN):
         input_size: int = 3,
         hidden_size: int = 1000,
         output_size: int = 2,
-        use_bias: bool = True
+        use_bias: bool = False
     ):
-        """
-        Initializes the PioneerNN network.
-
-        Args:
-            input_size (int): Dimension of input feature vector (default: 3).
-            hidden_size (int): Number of units in the hidden layer (default: 1000).
-            output_size (int): Dimension of output command vector (default: 2 [v, w]).
-            use_bias (bool): Whether to include affine bias vectors (default: True).
-        """
         if TORCH_AVAILABLE:
             super(PioneerNN, self).__init__()
 
@@ -242,37 +162,40 @@ class PioneerNN(BaseNN):
             self.activation = nn.Tanh()
             self._init_weights()
 
-        # Pure-Python weight representations for seamless embedded deployment
         self._py_input_weights = [[0.0] * hidden_size for _ in range(input_size)]
         self._py_output_weights = [[0.0] * output_size for _ in range(hidden_size)]
         self._py_hidden_bias = [0.0] * hidden_size
         self._py_output_bias = [0.0] * output_size
 
     def _init_weights(self) -> None:
-        """Initializes synaptic weights via Xavier Uniform initialization."""
+        """
+        Initializes synaptic weights with multiscale receptive fields across all hidden units
+        so that all 1,000 neurons participate across far-field, braking, and terminal zones.
+        """
         if TORCH_AVAILABLE:
-            nn.init.xavier_uniform_(self.hidden.weight)
-            nn.init.xavier_uniform_(self.output.weight)
-            if self.use_bias:
-                nn.init.zeros_(self.hidden.bias)
-                nn.init.zeros_(self.output.bias)
+            with torch.no_grad():
+                dirs = torch.randn(self.hidden_size, self.input_size)
+                norms = torch.norm(dirs, dim=1, keepdim=True).clamp(min=1e-6)
+                scales = torch.logspace(-0.2, 1.85, self.hidden_size).unsqueeze(1)
+                self.hidden.weight.copy_((dirs / norms) * scales)
+                nn.init.uniform_(self.output.weight, -1.0 / math.sqrt(self.hidden_size), 1.0 / math.sqrt(self.hidden_size))
+                if self.use_bias:
+                    nn.init.zeros_(self.hidden.bias)
+                    nn.init.zeros_(self.output.bias)
 
     def eval(self):
-        """Sets network in evaluation mode (inference)."""
         if TORCH_AVAILABLE and hasattr(super(), "eval"):
             super().eval()
         return self
 
     def train(self, mode: bool = True):
-        """Sets network in training mode."""
         if TORCH_AVAILABLE and hasattr(super(), "train"):
             super().train(mode)
         return self
 
     def forward(self, x: Any) -> Any:
         """
-        Executes forward propagation pass: y = Tanh(W_out * Tanh(W_in * x)).
-        Accepts PyTorch tensors, Python lists, or nested 2D matrices.
+        Executes forward propagation pass: y = Tanh(W_out * Tanh(W_in * x + b_h) + b_o).
         """
         if TORCH_AVAILABLE:
             if not isinstance(x, torch.Tensor):
@@ -288,7 +211,6 @@ class PioneerNN(BaseNN):
             out = self.activation(self.output(out))
             return out
 
-        # Pure Python fallback
         if hasattr(x, "tolist"):
             in_vec = x.tolist()
         else:
@@ -297,14 +219,12 @@ class PioneerNN(BaseNN):
         if len(in_vec) > 0 and isinstance(in_vec[0], list):
             in_vec = in_vec[0]
 
-        # Hidden layer forward pass
         h = []
         for j in range(self.hidden_size):
             val = self._py_hidden_bias[j] if self.use_bias else 0.0
             val += sum(in_vec[i] * self._py_input_weights[i][j] for i in range(self.input_size))
             h.append(math.tanh(val))
 
-        # Output layer forward pass
         out = []
         for k in range(self.output_size):
             val = self._py_output_bias[k] if self.use_bias else 0.0
@@ -323,21 +243,8 @@ class PioneerNN(BaseNN):
         Serializes synaptic weights and architecture metadata into the canonical JSON dictionary.
         """
         if TORCH_AVAILABLE:
-            input_weights = []
-            hidden_weights_transposed = self.hidden.weight.detach().cpu().t()
-            for i in range(self.input_size):
-                row = []
-                for j in range(self.hidden_size):
-                    row.append(float(hidden_weights_transposed[i][j]))
-                input_weights.append(row)
-
-            output_weights = []
-            out_weights_transposed = self.output.weight.detach().cpu().t()
-            for i in range(self.hidden_size):
-                row = []
-                for j in range(self.output_size):
-                    row.append(float(out_weights_transposed[i][j]))
-                output_weights.append(row)
+            input_weights = self.hidden.weight.detach().cpu().t().tolist()
+            output_weights = self.output.weight.detach().cpu().t().tolist()
 
             data = {
                 "input_size": self.input_size,
@@ -354,7 +261,6 @@ class PioneerNN(BaseNN):
 
             return data
 
-        # Pure Python serialization
         data = {
             "input_size": self.input_size,
             "hidden_size": self.hidden_size,
@@ -370,10 +276,8 @@ class PioneerNN(BaseNN):
 
     def load_weights_from_json(self, json_obj: Dict[str, Any]) -> None:
         """
-        Loads synaptic weights from a JSON object with bidirectional backward-compatibility
-        between 3-input and 4-input representations.
+        Loads synaptic weights from a JSON object.
         """
-        meta_input = json_obj.get("input_size", self.input_size)
         meta_hidden = json_obj.get("hidden_size", self.hidden_size)
         meta_output = json_obj.get("output_size", self.output_size)
         file_bias = json_obj.get("use_bias", False)
@@ -385,24 +289,16 @@ class PioneerNN(BaseNN):
 
         self.use_bias = file_bias
 
-        # Re-instantiate PyTorch layers if bias or dimensions altered
         if TORCH_AVAILABLE:
             self.hidden = nn.Linear(self.input_size, self.hidden_size, bias=self.use_bias)
             self.output = nn.Linear(self.hidden_size, self.output_size, bias=self.use_bias)
 
-            # Map weights with slicing if incoming JSON has differing input dimension
-            input_weights = torch.zeros(self.input_size, self.hidden_size)
             src_in_weights = json_obj["input_weights"]
             copy_rows = min(len(src_in_weights), self.input_size)
-            for i in range(copy_rows):
-                for j in range(self.hidden_size):
-                    input_weights[i][j] = src_in_weights[i][j]
+            input_weights = torch.zeros(self.input_size, self.hidden_size)
+            input_weights[:copy_rows, :] = torch.tensor(src_in_weights[:copy_rows], dtype=torch.float32)
 
-            output_weights = torch.zeros(self.hidden_size, self.output_size)
-            src_out_weights = json_obj["output_weights"]
-            for i in range(self.hidden_size):
-                for j in range(self.output_size):
-                    output_weights[i][j] = src_out_weights[i][j]
+            output_weights = torch.tensor(json_obj["output_weights"], dtype=torch.float32)
 
             with torch.no_grad():
                 self.hidden.weight.copy_(input_weights.t())
@@ -419,7 +315,6 @@ class PioneerNN(BaseNN):
                     else:
                         nn.init.zeros_(self.output.bias)
 
-        # Pure Python mirror
         src_in = json_obj["input_weights"]
         py_in = []
         for i in range(self.input_size):
@@ -434,22 +329,22 @@ class PioneerNN(BaseNN):
         self._py_output_bias = json_obj.get("output_bias", [0.0] * self.output_size)
 
     def save_to_json_file(self, file_path: str) -> None:
-        """Saves synaptic weights into a formatted JSON file."""
         os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
         data = self.save_weights_to_json()
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
     def load_from_json_file(self, file_path: str) -> None:
-        """Loads synaptic weights from a JSON file with automatic path resolution."""
         resolved_path = file_path
         if not os.path.exists(resolved_path):
             candidates = [
                 os.path.join(_project_root, file_path),
+                os.path.join(_project_root, "models", "pioneer_mecanum_weights.json"),
                 os.path.join(_project_root, "models", "supervised_w_torch_diff.json"),
                 os.path.join(_project_root, "models", "pioneer_model_weights.json"),
+                os.path.join(os.path.dirname(os.path.abspath(file_path)), "pioneer_mecanum_weights.json"),
                 os.path.join(os.path.dirname(os.path.abspath(file_path)), "supervised_w_torch_diff.json"),
-                os.path.join(os.path.dirname(os.path.abspath(file_path)), "pioneer_model_weights.json"),
+                "models/pioneer_mecanum_weights.json",
                 "models/supervised_w_torch_diff.json",
                 "models/pioneer_model_weights.json",
             ]

@@ -1,24 +1,33 @@
 """
-ROS 2 Hardware and Simulation Interface for AgileX LIMO
-========================================================
+ROS 2 Hardware and Simulation Interface for AgileX LIMO (Mecanum & Diff)
+========================================================================
 Handles asynchronous communication with the physical robot or Gazebo simulator
 via standard /odom and /cmd_vel topics.
 
 Features:
 - Subscription to odometry topic (/odom, /wheel/odom) at 20-50 Hz.
-- Analytical quaternion -> yaw (theta) conversion.
-- Velocity command publication (Twist) on /cmd_vel with strict safety bounds.
-- Hardware watchdog compliance (500 ms) and emergency stop.
+- Strict IEEE-754 NaN/Inf filtering on incoming odometry and outgoing commands.
+- Real-time odometry staleness watchdog (500 ms default from config.json).
+- Vectorial linear velocity limiting sqrt(vx^2 + vy^2) <= V_MAX.
+- Verified Gazebo teleportation (never forges pose offset if teleport fails).
 
 Project: LIMO Offline Learning (CERV / ENIB)
 """
 
 from __future__ import annotations
 
+import os
+import sys
 import math
 import time
 import threading
 from typing import List, Optional
+
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+from src.core.config import load_config
 
 try:
     import rclpy
@@ -33,33 +42,77 @@ except (ImportError, ModuleNotFoundError):
     Odometry = object
 
 
+def sanitize_and_clamp_twist(
+    v_lin: float,
+    v_ang: float,
+    v_y: float = 0.0,
+    v_max: float = 0.50,
+    w_max: float = 1.00,
+    enforce_limits: bool = True,
+) -> tuple[float, float, float]:
+    """
+    Sanitizes velocity commands against NaN/Inf (converting invalid values to 0.0)
+    and clamps translational speed by Euclidean vector norm sqrt(vx^2 + vy^2) <= v_max.
+    """
+    try:
+        vx = float(v_lin)
+        vy = float(v_y)
+        w = float(v_ang)
+    except (TypeError, ValueError):
+        return 0.0, 0.0, 0.0
+
+    if not (math.isfinite(vx) and math.isfinite(vy) and math.isfinite(w)):
+        return 0.0, 0.0, 0.0
+
+    if enforce_limits:
+        v_mag = math.hypot(vx, vy)
+        if v_mag > v_max and v_mag > 0.0:
+            scale = v_max / v_mag
+            vx *= scale
+            vy *= scale
+        w = max(-w_max, min(w_max, w))
+
+    return vx, vy, w
+
+
 class LimoROS2Interface(Node):
     """
     Isolated ROS 2 interface for the AgileX LIMO mobile robot.
-    
+
     Provides a strict method contract:
     - get_position() -> [x, y, theta]
-    - set_cmd_vel(v_lin, v_ang)
+    - is_odom_healthy(max_age_s) -> bool
+    - set_cmd_vel(v_lin, v_ang, v_y=0.0)
     - stop()
     - cleanup()
     """
 
-    def __init__(self, safety_limits: bool = True, odom_topic: Optional[str] = None, cmd_vel_topic: str = "/cmd_vel"):
-        """
-        Initializes the LIMO ROS 2 interface.
-
-        Args:
-            safety_limits (bool): Enables strict velocity clamping for the physical robot.
-            odom_topic (Optional[str]): Odometry topic name (None/'auto' listens to both /odom and /wheel/odom).
-            cmd_vel_topic (str): Velocity command topic name (default: /cmd_vel).
-        """
+    def __init__(
+        self,
+        safety_limits: bool = True,
+        odom_topic: Optional[str] = None,
+        cmd_vel_topic: Optional[str] = None,
+        odom_watchdog_timeout_s: Optional[float] = None,
+    ):
         if not ROS2_AVAILABLE:
             raise RuntimeError("The rclpy module is not available in this Python environment.")
 
         super().__init__("limo_offline_interface")
+        cfg = load_config()
+        kin_cfg = cfg["kinematics"]
+        ros_cfg = cfg["ros2_and_safety"]
+
+        self.v_max = float(kin_cfg["v_max"])
+        self.w_max = float(kin_cfg["w_max"])
         self.safety_limits = safety_limits
-        self.odom_topic = odom_topic
-        self.cmd_vel_topic = cmd_vel_topic
+        self.odom_topic = odom_topic if odom_topic is not None else ros_cfg["odom_topic"]
+        self.cmd_vel_topic = cmd_vel_topic if cmd_vel_topic is not None else ros_cfg["cmd_vel_topic"]
+        self.odom_watchdog_timeout_s = float(
+            odom_watchdog_timeout_s
+            if odom_watchdog_timeout_s is not None
+            else ros_cfg["odom_watchdog_timeout_s"]
+        )
+        self.default_gazebo_model = str(ros_cfg["gazebo_model_name"])
         self._active_odom_topic: Optional[str] = None
 
         # Internal robot pose [x, y, theta] and origin offsets
@@ -71,6 +124,9 @@ class LimoROS2Interface(Node):
         self._offset = [0.0, 0.0, 0.0]
         self._lock = threading.Lock()
         self._odom_received = False
+        self._odom_valid = False
+        self._last_odom_time = 0.0
+        self._odom_seq = 0
 
         # Odometry subscriptions
         self._odom_subs = []
@@ -81,7 +137,6 @@ class LimoROS2Interface(Node):
             self._odom_subs.append(sub)
             print(f"[LimoROS2Interface] Subscribed to odometry topic: {self.odom_topic}")
         else:
-            # Auto-discovery: listen simultaneously to /odom and /wheel/odom
             for candidate in ["/odom", "/wheel/odom"]:
                 sub = self.create_subscription(
                     Odometry, candidate, lambda msg, t=candidate: self._odom_callback(msg, t), 10
@@ -95,41 +150,61 @@ class LimoROS2Interface(Node):
         self._spin_thread = threading.Thread(target=rclpy.spin, args=(self,), daemon=True)
         self._spin_thread.start()
 
-        # Await first odometry frame
+        # Await first valid odometry frame
         wait_start = time.time()
         while not self._odom_received and rclpy.ok():
             time.sleep(0.05)
             if time.time() - wait_start > 5.0:
                 topics_str = self.odom_topic if (self.odom_topic and self.odom_topic != "auto") else "/odom, /wheel/odom"
-                print(f"[LimoROS2Interface] Waiting for odometry stream on {topics_str}...")
+                print(f"[LimoROS2Interface] Waiting for valid odometry stream on {topics_str}...")
                 wait_start = time.time()
 
-        print(f"[LimoROS2Interface] First odometry frame successfully received on '{self.odom_topic}'.")
+        print(f"[LimoROS2Interface] First valid odometry frame received on '{self.odom_topic}'.")
 
     def _odom_callback(self, msg: Odometry, topic_name: str = "/odom") -> None:
         """
-        Odometry message processing callback.
-        Extracts Cartesian position and converts quaternion to yaw angle (theta).
-        Applies 2D SO(2) rotation matrix relative to initial calibration origin.
+        Odometry message processing callback with strict NaN/Inf and quaternion validation.
         """
+        try:
+            pos_x = float(msg.pose.pose.position.x)
+            pos_y = float(msg.pose.pose.position.y)
+            quat = msg.pose.pose.orientation
+            qx = float(quat.x)
+            qy = float(quat.y)
+            qz = float(quat.z)
+            qw = float(quat.w)
+        except (AttributeError, TypeError, ValueError):
+            with self._lock:
+                self._odom_valid = False
+            return
+
+        if not all(math.isfinite(v) for v in (pos_x, pos_y, qx, qy, qz, qw)):
+            with self._lock:
+                self._odom_valid = False
+            return
+
+        q_norm_sq = qx * qx + qy * qy + qz * qz + qw * qw
+        if q_norm_sq < 1e-8:
+            with self._lock:
+                self._odom_valid = False
+            return
+
+        siny_cosp = 2.0 * (qw * qz + qx * qy)
+        cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+        theta = math.atan2(siny_cosp, cosy_cosp)
+        if not math.isfinite(theta):
+            with self._lock:
+                self._odom_valid = False
+            return
+
         with self._lock:
             if self._active_odom_topic is None:
                 self._active_odom_topic = topic_name
                 self.odom_topic = topic_name
                 print(f"[LimoROS2Interface] Odometry stream locked to topic: {topic_name}")
             elif self._active_odom_topic != topic_name:
-                return  # Ignore messages from alternate topic once primary is locked
+                return
 
-        pos_x = float(msg.pose.pose.position.x)
-        pos_y = float(msg.pose.pose.position.y)
-        quat = msg.pose.pose.orientation
-
-        # Quaternion -> Yaw angle conversion formula
-        siny_cosp = 2.0 * (quat.w * quat.z + quat.x * quat.y)
-        cosy_cosp = 1.0 - 2.0 * (quat.y * quat.y + quat.z * quat.z)
-        theta = math.atan2(siny_cosp, cosy_cosp)
-
-        with self._lock:
             self._raw_position = [pos_x, pos_y, theta]
             dx_raw = pos_x - self._raw_origin[0]
             dy_raw = pos_y - self._raw_origin[1]
@@ -146,12 +221,29 @@ class LimoROS2Interface(Node):
                 adj_theta
             ]
             self._odom_received = True
+            self._odom_valid = True
+            self._last_odom_time = time.monotonic()
+            self._odom_seq += 1
+
+    def is_odom_healthy(self, max_age_s: Optional[float] = None) -> bool:
+        """
+        Verifies that odometry is valid (finite) and fresh (not frozen/stopped).
+        """
+        timeout = float(max_age_s if max_age_s is not None else self.odom_watchdog_timeout_s)
+        with self._lock:
+            if not self._odom_received or not self._odom_valid:
+                return False
+            age = time.monotonic() - self._last_odom_time
+            if age > timeout:
+                return False
+            return all(math.isfinite(p) for p in self._position)
 
     def reset_pose(self, x0: float, y0: float, theta0: float) -> None:
         """
-        Calibrates the odometry origin so the robot starts exactly at (x0, y0, theta0).
-        Allows virtual repositioning or after Gazebo model teleportation.
+        Calibrates the odometry origin so the robot starts at (x0, y0, theta0).
         """
+        if not all(math.isfinite(v) for v in (x0, y0, theta0)):
+            raise ValueError(f"Invalid non-finite reset_pose target: ({x0}, {y0}, {theta0})")
         with self._lock:
             raw_x, raw_y, raw_th = self._raw_position
             diff_th = math.atan2(math.sin(theta0 - raw_th), math.cos(theta0 - raw_th))
@@ -160,58 +252,83 @@ class LimoROS2Interface(Node):
             self._offset_th = diff_th
             self._offset = [x0 - raw_x, y0 - raw_y, diff_th]
             self._position = [x0, y0, theta0]
-        print(f"[LimoROS2Interface] Pose reset to: x={x0:.2f} m, y={y0:.2f} m, theta={theta0:.2f} rad")
+        print(f"[LimoROS2Interface] Pose calibrated to: x={x0:.2f} m, y={y0:.2f} m, theta={theta0:.2f} rad")
 
-    def teleport_gazebo(self, x0: float, y0: float, theta0: float, model_name: str = "limo_description") -> bool:
+    def teleport_gazebo(self, x0: float, y0: float, theta0: float, model_name: Optional[str] = None) -> bool:
         """
-        Teleports the 3D robot model in Gazebo and calibrates odometry to (x0, y0, theta0).
+        Teleports the 3D robot model in Gazebo and verifies success before calibrating odometry.
+        Never forges the software pose if the simulator teleportation fails.
         """
         import subprocess
-        # 0. Strict motor stop prior to teleportation
+        if not all(math.isfinite(v) for v in (x0, y0, theta0)):
+            print(f"[LimoROS2Interface] ERROR: Refusing to teleport to non-finite pose ({x0}, {y0}, {theta0}).")
+            return False
+
+        target_model = model_name or self.default_gazebo_model
+        candidate_models = []
+        for m in [target_model, "limo_description", "limo", "agilex_limo"]:
+            if m and m not in candidate_models:
+                candidate_models.append(m)
+
         self.stop()
         time.sleep(0.10)
 
         success = False
         # 1. Attempt via gz model CLI utility
-        try:
-            res = subprocess.run(
-                ["gz", "model", "-m", model_name, "-x", str(x0), "-y", str(y0), "-z", "0.05", "-Y", str(theta0)],
-                capture_output=True, timeout=2.0
-            )
-            if res.returncode == 0:
-                success = True
-        except Exception:
-            pass
-
-        # 2. Attempt via ROS 2 /set_entity_state service
-        if not success:
+        for cand in candidate_models:
             try:
-                qz = math.sin(theta0 / 2.0)
-                qw = math.cos(theta0 / 2.0)
                 res = subprocess.run(
-                    [
-                        "ros2", "service", "call", "/set_entity_state", "gazebo_msgs/srv/SetEntityState",
-                        f"{{state: {{name: '{model_name}', pose: {{position: {{x: {x0}, y: {y0}, z: 0.05}}, orientation: {{z: {qz}, w: {qw}}}}}}}}}"
-                    ],
-                    capture_output=True, timeout=3.0
+                    ["gz", "model", "-m", cand, "-x", str(x0), "-y", str(y0), "-z", "0.05", "-Y", str(theta0)],
+                    capture_output=True, text=True, timeout=2.0
                 )
-                if res.returncode == 0:
+                stderr_low = (res.stderr or "").lower()
+                if res.returncode == 0 and "error" not in stderr_low and "unable" not in stderr_low:
                     success = True
+                    break
             except Exception:
                 pass
 
-        # 3. Physical settling and odometric calibration
+        # 2. Attempt via ROS 2 /set_entity_state service
+        if not success:
+            qz = math.sin(theta0 / 2.0)
+            qw = math.cos(theta0 / 2.0)
+            for cand in candidate_models:
+                try:
+                    res = subprocess.run(
+                        [
+                            "ros2", "service", "call", "/set_entity_state", "gazebo_msgs/srv/SetEntityState",
+                            f"{{state: {{name: '{cand}', pose: {{position: {{x: {x0}, y: {y0}, z: 0.05}}, orientation: {{z: {qz}, w: {qw}}}}}}}}}"
+                        ],
+                        capture_output=True, text=True, timeout=3.0
+                    )
+                    out_low = ((res.stdout or "") + " " + (res.stderr or "")).lower()
+                    if res.returncode == 0 and ("success=true" in out_low or "success: true" in out_low):
+                        success = True
+                        break
+                except Exception:
+                    pass
+
+        if not success:
+            self.stop()
+            print(
+                f"[LimoROS2Interface] ERROR: Gazebo teleportation to "
+                f"(x={x0:.2f}, y={y0:.2f}, theta={theta0:.2f}) FAILED. Pose was NOT forged."
+            )
+            return False
+
+        # 3. Physical settling and verified odometric calibration
         time.sleep(0.35)
         self.stop()
+        if not self.is_odom_healthy():
+            print("[LimoROS2Interface] ERROR: Odometry stream unhealthy after teleportation.")
+            return False
+
         self.reset_pose(x0, y0, theta0)
-        return success
+        return True
 
     def get_position(self) -> List[float]:
         """
         Returns the current Cartesian and angular pose of the robot [x, y, theta].
-
-        Returns:
-            List[float]: [x (m), y (m), theta (rad)]
         """
         with self._lock:
             return list(self._position)
@@ -219,27 +336,26 @@ class LimoROS2Interface(Node):
     def set_cmd_vel(self, v_lin: float, v_ang: float, v_y: float = 0.0) -> None:
         """
         Publishes linear (x, optional y for mecanum) and angular velocity commands on /cmd_vel.
-
-        Args:
-            v_lin (float): Forward linear velocity in m/s.
-            v_ang (float): Rotational yaw rate in rad/s.
-            v_y (float): Lateral linear velocity in m/s (mecanum/holonomic mode, default: 0.0).
+        Strictly filters NaN/Inf to 0.0 and clamps translational velocity by Euclidean norm.
         """
-        if self.safety_limits:
-            # Strict safety bounds to protect mobile hardware
-            v_lin = max(-0.5, min(0.5, float(v_lin)))
-            v_y = max(-0.5, min(0.5, float(v_y)))
-            v_ang = max(-1.0, min(1.0, float(v_ang)))
+        vx, vy, w = sanitize_and_clamp_twist(
+            v_lin=v_lin,
+            v_ang=v_ang,
+            v_y=v_y,
+            v_max=self.v_max,
+            w_max=self.w_max,
+            enforce_limits=self.safety_limits,
+        )
 
         msg = Twist()
-        msg.linear.x = float(v_lin)
-        msg.linear.y = float(v_y)
-        msg.angular.z = float(v_ang)
+        msg.linear.x = vx
+        msg.linear.y = vy
+        msg.angular.z = w
         self._cmd_pub.publish(msg)
 
     def stop(self) -> None:
         """Immediately sends an emergency stop command (zero velocities)."""
-        self.set_cmd_vel(0.0, 0.0)
+        self.set_cmd_vel(0.0, 0.0, 0.0)
 
     def cleanup(self) -> None:
         """Stops the robot and cleanly destroys the ROS 2 node."""

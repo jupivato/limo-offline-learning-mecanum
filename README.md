@@ -4,6 +4,8 @@ Projet d'apprentissage hors ligne (*behavioral cloning*) pour la commande holono
 
 > **Cible d'amarrage :** $(x = 0.0\text{ m},\; y = 0.0\text{ m},\; \theta = 0.0\text{ rad})$.  
 > Le contrôleur lit l'odométrie accumulée des roues et ramène le robot vers l'origine où le pilote a été démarré.
+>
+> **Paramètres :** tous les paramètres principaux sont lus uniquement dans `config.json` (aucune valeur par défaut cachée dans le code ; une clé manquante arrête le programme avec un message explicite). Le jeu de données utilise 7 500 échantillons par classe × 6 classes = 45 000 échantillons. Les valeurs d'entraînement réellement utilisées sont enregistrées dans `training_history_mecanum.json` (`effective_config`).
 
 ---
 
@@ -11,6 +13,7 @@ Projet d'apprentissage hors ligne (*behavioral cloning*) pour la commande holono
 
 ```text
 limo-offline-learning-mecanum/
+├── config.json                          # SOURCE UNIQUE de tous les paramètres (vitesses, expert, entraînement, ROS 2)
 ├── data/
 │   └── dataset_mecanum.csv             # Jeu de données holonome (45 000 échantillons, 6 colonnes)
 ├── models/
@@ -80,13 +83,14 @@ Conduisez le robot jusqu'à la position de départ souhaitée (par ex. à $1{,}5
 ```bash
 source /opt/ros/foxy/setup.bash   # ou humble
 cd ~/limo-offline-learning-mecanum
-python3 src/evaluation/run_autonomous.py --real --speed-scale 0.6
+python3 src/evaluation/run_autonomous.py --real
 ```
+*(La vitesse vient de `kinematics.speed_scale = 0.55` dans `config.json` : $\|V\|_{\max}^{\text{eff}} = 0.275\text{ m/s}$, identique sous Gazebo et sur le robot réel.)*
 1. Vérifiez la pose initiale affichée depuis `/odom`.
 2. Appuyez sur **`Entrée`** pour démarrer la navigation autonome vers $(0, 0, 0)$.
 3. Les journaux et graphiques d'exécution sont enregistrés automatiquement dans `data/evaluation/`.
 
-> **Astuce :** Pour réduire davantage la vitesse et limiter le patinage des rouleaux Mecanum sur sol lisse, utilisez `--speed-scale 0.4` ou `0.5`.
+> **Astuce :** Pour réduire davantage la vitesse et limiter le patinage des rouleaux Mecanum sur sol lisse, utilisez `--speed-scale 0.4` ou `0.5` (surcharge ponctuelle de `config.json`).
 
 ### Terminal 4 (optionnel) — Surveiller la pose en temps réel
 ```bash

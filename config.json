@@ -1,0 +1,65 @@
+{
+  "kinematics": {
+    "v_max": 0.50,
+    "w_max": 1.00,
+    "x_max": 5.0,
+    "y_max": 5.0,
+    "half_track_b": 0.086,
+    "dt": 0.050,
+    "speed_scale": 0.55
+  },
+  "docking_and_iso": {
+    "dist_tol": 0.08,
+    "angle_tol": 0.26,
+    "dwell_time": 30.0,
+    "max_duration": 150.0,
+    "stopped_vel_tol": 0.03,
+    "stopped_ang_tol": 0.04,
+    "stopped_move_window_m": 0.005,
+    "stopped_rot_window_rad": 0.02,
+    "window_samples": 20
+  },
+  "expert_and_dataset": {
+    "d_stop_outer": 0.080,
+    "d_stop_internal": 0.012,
+    "d_stop_angle_internal": 0.020,
+    "d_brake": 0.45,
+    "angle_brake": 0.60,
+    "ramp_min": 0.08,
+    "sym_break_theta": 2.95,
+    "class_v_eps": 0.025,
+    "class_w_eps": 0.040,
+    "step_xy": 0.20,
+    "num_angles": 24,
+    "samples_per_class": 7500,
+    "dataset_csv": "data/dataset_mecanum.csv"
+  },
+  "network_and_training": {
+    "input_size": 3,
+    "hidden_size": 1000,
+    "output_size": 3,
+    "use_bias": false,
+    "epochs": 30,
+    "batch_size": 128,
+    "lr_hidden": 0.002,
+    "lr_output": 0.003,
+    "lr_bias": 0.001,
+    "wd_hidden": 0.0001,
+    "wd_output": 0.01,
+    "wd_bias": 0.01,
+    "scheduler_eta_min": 0.0001,
+    "loss_near_dock_weight": [1.0, 4.0, 0.05],
+    "reg_spread": [0.02, 0.015],
+    "beta": 0.3,
+    "val_split": 0.8,
+    "seed": 42,
+    "weights_path": "models/pioneer_mecanum_weights.json",
+    "history_path": "models/training_history_mecanum.json"
+  },
+  "ros2_and_safety": {
+    "odom_topic": "auto",
+    "cmd_vel_topic": "/cmd_vel",
+    "odom_watchdog_timeout_s": 0.50,
+    "gazebo_model_name": "limo_description"
+  }
+}
