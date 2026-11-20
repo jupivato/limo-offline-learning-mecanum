@@ -1,5 +1,6 @@
 {
   "mode": "mecanum",
+  "optimizer": "AdamW",
   "use_bias": false,
   "effective_config": {
     "optimizer": "adamw",

@@ -225,6 +225,7 @@ def train_mecanum(
 
     history: Dict[str, Any] = {
         "mode": "mecanum",
+        "optimizer": "AdamW",
         "use_bias": use_bias,
         "effective_config": {
             "optimizer": "adamw",

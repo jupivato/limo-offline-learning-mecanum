@@ -1,114 +1,64 @@
-# LIMO Offline Learning — Mode Mecanum (Holonome, 3 Sorties)
+# LIMO Offline Learning (Mecanum) : apprentissage hors-ligne pour le LIMO en mode holonome
 
-Projet d'apprentissage hors ligne (*behavioral cloning*) pour la commande holonome et l'amarrage autonome en boucle fermée du robot **AgileX LIMO** en mode **Mecanum**, sous ROS 2 (`/odom` et `/cmd_vel` avec `linear.x`, `linear.y` et `angular.z`).
+Ce dépôt est la variante **Mecanum** (holonome) du projet
+[limo-offline-learning](https://github.com/jupivato/limo-offline-learning) : un superviseur
+expert génère un jeu de données, un réseau **PioneerNN** (MLP 3 → 1000 → 3, tanh) apprend
+à l'imiter, puis le réseau seul ramène le robot AgileX LIMO, en mode Mecanum, jusqu'au quai
+d'amarrage $(0, 0, 0^\circ)$ en commandant `linear.x`, `linear.y` et `angular.z`.
 
-> **Cible d'amarrage :** $(x = 0.0\text{ m},\; y = 0.0\text{ m},\; \theta = 0.0\text{ rad})$.  
-> Le contrôleur lit l'odométrie accumulée des roues et ramène le robot vers l'origine où le pilote a été démarré.
->
-> **Paramètres :** tous les paramètres principaux sont lus uniquement dans `config.json` (aucune valeur par défaut cachée dans le code ; une clé manquante arrête le programme avec un message explicite). Le jeu de données utilise 7 500 échantillons par classe × 6 classes = 45 000 échantillons. Les valeurs d'entraînement réellement utilisées sont enregistrées dans `training_history_mecanum.json` (`effective_config`).
->
-> **Validation sans fuite (modèle ré-entraîné le 22/11/2026).** Pour équilibrer les classes, le générateur complète les classes peu peuplées par des copies bruitées (±0,5 mm) d'états existants (16 940 copies, surtout dans les classes de rotation pure). Chaque échantillon porte un `group_id` et la séparation entraînement/validation se fait par groupe : une copie reste toujours du même côté que son état d'origine. La perte de validation est donc honnête (0,0092 contre 0,0089 auparavant, valeur alors optimiste). En simulation cinématique holonome, le nouveau modèle converge sur 40/40 essais, comme l'ancien.
+| Dépôt | Mode | Sorties du réseau | Simulation Gazebo | Évaluation |
+|---|---|---|---|---|
+| [`limo-offline-learning`](https://github.com/jupivato/limo-offline-learning) | Différentiel (non-holonome) | `v, ω` (2) | Oui | Gazebo + robot réel |
+| **`limo-offline-learning-mecanum`** (ce dépôt) | Mecanum (holonome) | `vx, vy, ω` (3) | Non, pas de modèle officiel | Robot réel |
 
----
+Il n'existe pas de modèle Gazebo officiel du LIMO en mode Mecanum : ce dépôt se teste
+**uniquement sur le robot réel**.
 
-## Structure du projet
+## Comment ça marche
 
-```text
-limo-offline-learning-mecanum/
-├── config.json                          # SOURCE UNIQUE de tous les paramètres (vitesses, expert, entraînement, ROS 2)
-├── data/
-│   └── dataset_mecanum.csv             # Jeu de données holonome (45 000 échantillons, 6 colonnes)
-├── models/
-│   ├── pioneer_mecanum_weights.json    # Poids entraînés du PioneerNN (3 -> 1000 -> 3)
-│   └── training_history_mecanum.json   # Historique de la perte MSE durant l'entraînement
-├── src/
-│   ├── generate_dataset_mecanum.py     # Générateur du jeu de données (vx, vy, w)
-│   ├── train_mecanum.py                # Entraînement hors ligne du réseau de neurones
-│   ├── core/
-│   │   └── pioneer_nn.py               # Architecture MLP PioneerNN (PyTorch + fallback Python pur)
-│   ├── ros2/
-│   │   ├── limo_interface.py           # Interface ROS 2 (/odom et /cmd_vel avec linear.y)
-│   │   └── show_pose.py                # Moniteur de pose (x, y, theta) en temps réel
-│   └── evaluation/
-│       ├── data_logger.py              # Enregistrement de la télémétrie à 20 Hz et graphiques
-│       └── run_autonomous.py           # Exécution autonome en boucle fermée (défaut --mode mecanum)
-└── README.md
+```
+config.json ─► generate_dataset_mecanum.py ─► data/dataset_mecanum.csv ─► train_mecanum.py ─► models/pioneer_mecanum_weights.json
+                (expert holonome)              (45 000 exemples)          (PioneerNN 3->1000->3)        │
+                                                                                                        ▼
+                                                              run_autonomous.py --real (robot en mode Mecanum)
 ```
 
----
+- Entrées (repère du robot) : $[x_r/5,\ y_r/5,\ e_\theta/\pi]$.
+- Sorties : $[\hat v_x, \hat v_y, \hat\omega] \in [-1, 1]^3$, converties en
+  $v_x = \hat v_x \cdot 0.50 \cdot s$, $v_y = \hat v_y \cdot 0.50 \cdot s$ (norme limitée à $0.50 \cdot s$),
+  $\omega = \hat\omega \cdot 1.00$, avec $s$ = `speed_scale` = 0,55.
+- Réseau sans biais : la commande est exactement nulle au quai, $\text{MLP}(0, 0, 0) = (0, 0, 0)$.
+- Tous les paramètres sont dans **`config.json`**, seule source de vérité.
 
-## 1. Générer le jeu de données et entraîner (optionnel)
+## Pour commencer
 
-Le jeu de données (`data/dataset_mecanum.csv`) et les poids entraînés (`models/pioneer_mecanum_weights.json`) sont déjà inclus et prêts à l'emploi. Exécutez les commandes ci-dessous uniquement si vous souhaitez régénérer les données ou réentraîner le modèle :
+1. [`docs/INSTALL.md`](docs/INSTALL.md) : installer l'environnement (ROS 2, dépendances Python)
+2. [`docs/TRAINING.md`](docs/TRAINING.md) : générer le jeu de données, entraîner le réseau, tracer les courbes
+3. [`docs/ROBOTS.md`](docs/ROBOTS.md) : faire tourner le contrôleur sur le robot et mesurer ses performances (ISO 18646-2)
 
-```bash
-python3 src/generate_dataset_mecanum.py
-python3 src/train_mecanum.py
+Le jeu de données et les poids entraînés sont déjà inclus : pour une démonstration, on peut
+passer directement à [`docs/ROBOTS.md`](docs/ROBOTS.md).
+
+## Structure du dépôt
+
+```
+config.json                       tous les paramètres du projet (source unique)
+requirements.txt                  dépendances Python
+src/
+  generate_dataset_mecanum.py     superviseur expert holonome + génération du jeu de données
+  train_mecanum.py                entraînement supervisé de la PioneerNN à 3 sorties
+  core/config.py                  chargement strict de config.json, critères d'amarrage
+  core/pioneer_nn.py              architecture PioneerNN
+  ros2/limo_interface.py          interface ROS 2 (/odom, /cmd_vel avec linear.y)
+  ros2/show_pose.py               affichage de la pose en direct dans le terminal
+  evaluation/run_autonomous.py    essai d'amarrage en boucle fermée (--mode mecanum par défaut)
+  evaluation/data_logger.py       enregistrement CSV 20 Hz et graphiques
+data/dataset_mecanum.csv          jeu de données (45 000 exemples, 6 classes)
+models/                           poids entraînés et historique d'apprentissage
+docs/                             documentation
 ```
 
----
+## Contexte
 
-## 2. Exécution sur le robot physique (AgileX LIMO — Mode Mecanum)
-
-> **Important :** Avant de lancer le pilote, assurez-vous que le LIMO physique est bien configuré en **mode Mecanum** et positionné **exactement au point cible $(0, 0, 0)$**, orienté vers l'avant ($0^\circ$).
-
-Dans **tous** les terminaux ouverts sur le robot, chargez d'abord l'environnement ROS 2 correspondant :
-- **LIMO COBOT (Ubuntu 20.04 / ROS 2 Foxy) :** `source /opt/ros/foxy/setup.bash`
-- **LIMO Standard (Ubuntu 22.04 / ROS 2 Humble) :** `source /opt/ros/humble/setup.bash`
-
-### Terminal 1 — Lancer le pilote des moteurs (`limo_base` en mode Mecanum)
-```bash
-# LIMO COBOT (Foxy) :
-source /opt/ros/foxy/setup.bash
-source ~/limo_ros2_ws/install/setup.bash
-ros2 launch limo_base limo_base.launch.py use_mcnamu:=true
-
-# OU LIMO Standard (Humble) :
-source /opt/ros/humble/setup.bash
-source ~/agilex_ws/install/setup.bash
-ros2 launch limo_base limo_base.launch.py use_mcnamu:=true
-```
-*(Laissez ce terminal ouvert pendant toute la durée du test. Si le port série `ttylimo` n'est pas détecté, ajoutez `port_name:=ttyUSB0`. Sur le LIMO COBOT, exécutez les commandes directement sur le robot — en local ou via SSH — car `ROS_LOCALHOST_ONLY=1` évite les plantages de CycloneDDS.)*
-
-### Terminal 2 — Téléopération (amener le robot au point de départ)
-```bash
-source /opt/ros/foxy/setup.bash   # ou humble
-ros2 run teleop_twist_keyboard teleop_twist_keyboard
-```
-* `i` / `,` : Avant / Arrière
-* `j` / `l` : Rotation sur place (gauche / droite)
-* `k` : Arrêt immédiat
-
-Conduisez le robot jusqu'à la position de départ souhaitée (par ex. à $1{,}5\text{ m}$ ou $2{,}0\text{ m}$ de distance), appuyez sur **`k`** pour l'arrêter, puis quittez avec **`Ctrl + C`**.
-
-### Terminal 3 — Lancer le contrôleur autonome Mecanum
-```bash
-source /opt/ros/foxy/setup.bash   # ou humble
-cd ~/limo-offline-learning-mecanum
-python3 src/evaluation/run_autonomous.py --real
-```
-*(La vitesse vient de `kinematics.speed_scale = 0.55` dans `config.json` : $\|V\|_{\max}^{\text{eff}} = 0.275\text{ m/s}$, identique sous Gazebo et sur le robot réel.)*
-1. Vérifiez la pose initiale affichée depuis `/odom`.
-2. Appuyez sur **`Entrée`** pour démarrer la navigation autonome vers $(0, 0, 0)$.
-3. Les journaux et graphiques d'exécution sont enregistrés automatiquement dans `data/evaluation/`.
-
-> **Astuce :** Pour réduire davantage la vitesse et limiter le patinage des rouleaux Mecanum sur sol lisse, utilisez `--speed-scale 0.4` ou `0.5` (surcharge ponctuelle de `config.json`).
-
-> **Topic d'odométrie :** par défaut (`ros2_and_safety.odom_topic = "auto"`), le contrôleur et `show_pose.py` utilisent le premier topic disponible dans l'ordre `/odom`, puis `/wheel/odom`. Si le robot publie les deux, fixez le topic voulu dans `config.json` (ex. `"odom_topic": "/odom"`) pour garantir que tous les outils lisent la même odométrie.
-
-### Terminal 4 (optionnel) — Surveiller la pose en temps réel
-```bash
-source /opt/ros/foxy/setup.bash   # ou humble
-cd ~/limo-offline-learning-mecanum
-python3 src/ros2/show_pose.py
-```
-
----
-
-## Commandes utiles et arrêt d'urgence
-
-| Action | Commande |
-| :--- | :--- |
-| **Arrêt d'urgence immédiat** | `ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0, y: 0.0}, angular: {z: 0.0}}" --once` |
-| **Vérifier la fréquence d'odométrie** | `ros2 topic hz /odom` (ou `/wheel/odom`) |
-| **Tester le modèle différentiel avec ce script** | `python3 src/evaluation/run_autonomous.py --real --mode diff --weights <chemin_poids_diff.json>` |
+Projet Pluridisciplinaire en Équipe (PPE),
+Centre Européen de Réalité Virtuelle (CERV) / École Nationale d'Ingénieurs de Brest (ENIB).
