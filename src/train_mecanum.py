@@ -194,6 +194,8 @@ def train_mecanum(
     Y = torch.tensor(targets, dtype=torch.float32)
 
     dist_n = torch.hypot(X[:, 0], X[:, 1])
+    # Sample weight 1 + 4·exp(-d/0.05), with d the NORMALIZED distance (x/5, y/5):
+    # 0.05 normalized = 0.25 m, i.e. the weight decays over the last ~25 cm before the dock.
     w_far, w_near, near_scale = (float(v) for v in net_cfg["loss_near_dock_weight"])
     spread_gain, spread_floor = (float(v) for v in net_cfg["reg_spread"])
     sample_w = w_far + w_near * torch.exp(-dist_n / near_scale)
@@ -214,6 +216,8 @@ def train_mecanum(
     _init_multiscale_mecanum_bank(model, seed)
     model.to(device)
 
+    if str(net_cfg["optimizer"]).lower() != "adamw":
+        raise ValueError("config.json: network_and_training.optimizer must be 'adamw' for the Mecanum trainer")
     optimizer = torch.optim.AdamW(
         [
             {"params": [model.hidden.weight], "lr": lr_hidden, "weight_decay": float(net_cfg["wd_hidden"])},

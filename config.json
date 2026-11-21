@@ -41,6 +41,7 @@
     "use_bias": false,
     "epochs": 30,
     "batch_size": 128,
+    "optimizer": "adamw",
     "lr_hidden": 0.002,
     "lr_output": 0.003,
     "lr_bias": 0.001,

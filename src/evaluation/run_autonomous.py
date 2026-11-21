@@ -2,7 +2,8 @@
 Closed-Loop Autonomous Navigation and ISO 18646-2 Metrological Positioning (Mecanum)
 ====================================================================================
 Executes closed-loop autonomous navigation with frozen synaptic weights on the 
-AgileX LIMO mobile robot at 20 Hz, supporting both Gazebo simulation and physical hardware.
+AgileX LIMO mobile robot (Mecanum mode) at 20 Hz, on the physical robot only
+(there is no official Gazebo model of the Mecanum LIMO).
 
 Key Safety & Metrological Features:
 -----------------------------------
@@ -11,8 +12,8 @@ Key Safety & Metrological Features:
    contains non-finite values or freezes beyond `odom_watchdog_timeout_s`.
 3. Vectorial Velocity Limiting: Clamps translational speed by Euclidean norm
    sqrt(vx^2 + vy^2) <= V_MAX (preventing 0.71 m/s diagonal overspeed).
-4. Validated Gazebo Teleportation: Verifies simulator teleportation before
-   starting a trial; never runs with a forged pose offset.
+4. Known starting pose: --teleport-to X Y THETA recalibrates the odometry on a pose
+   marked on the floor (the robot is placed there by hand).
 5. Unified ISO 18646-2 Docking & Dwell Verification: Uses `check_docking_and_stationarity`.
 
 Standards Compliance: ROS REP-103 & ISO 18646-2.
@@ -67,11 +68,7 @@ DEFAULT_ANGLE_TOL = float(_DOCK["angle_tol"])
 DEFAULT_DWELL_TIME = float(_DOCK["dwell_time"])
 DEFAULT_MAX_DURATION = float(_DOCK["max_duration"])
 
-# Default Gazebo start when the robot is already inside the dock and no --teleport-to
-# is given: first pose of the iso suite, (1.5 m, 1.5 m) facing the centre (-135° = 225°).
-DEFAULT_GAZEBO_START = (1.5, 1.5, -3.0 * math.pi / 4.0)
 
-DEFAULT_WEIGHTS_DIFF = "models/supervised_w_torch_diff.json"
 DEFAULT_WEIGHTS_MECANUM = _NET["weights_path"]
 
 
@@ -134,9 +131,16 @@ def run_autonomous_session(
     net_cfg = cfg["network_and_training"]
     ros_cfg = cfg["ros2_and_safety"]
 
+    if not is_real:
+        raise SystemExit(
+            "There is no official Gazebo model of the LIMO in Mecanum mode: this repository runs on the "
+            "physical robot only. Use --real (see docs/ROBOTS.md)."
+        )
     is_mecanum = (mode == "mecanum")
     if weights_path is None:
-        weights_path = DEFAULT_WEIGHTS_MECANUM if is_mecanum else DEFAULT_WEIGHTS_DIFF
+        if not is_mecanum:
+            raise SystemExit("--mode diff requires --weights <differential weights JSON> (they are not part of this repository).")
+        weights_path = DEFAULT_WEIGHTS_MECANUM
     output_size = 3 if is_mecanum else 2
 
     target = target if target is not None else [0.0, 0.0, 0.0]
@@ -156,7 +160,7 @@ def run_autonomous_session(
     print(f"Kinematic Mode       : {'Mecanum Holonomic (3 outputs: vx, vy, w)' if is_mecanum else 'Differential (2 outputs: v, w)'}")
     print(f"Weights Artifact     : {weights_path}")
     print(f"Dock Target [x,y,θ]  : x={target[0]:.3f} m, y={target[1]:.3f} m, θ={math.degrees(target[2]):.1f}°")
-    print(f"Platform Mode        : {'Physical LIMO Hardware' if is_real else 'Gazebo Simulation'}")
+    print("Platform Mode        : Physical LIMO Hardware")
     print(f"Cruise Limits        : ||V||_max = {v_max_effective:.2f} m/s | W_max = {w_max_effective:.2f} rad/s (Scale: {eff_scale*100:.0f}%)")
     print(f"Capture Threshold    : Distance <= {dist_tol * 100:.1f} cm | Angle <= {math.degrees(angle_tol):.1f}°")
     print(f"Stationary Dwell     : {dwell_time_required:.1f} s continuous immobilization")
@@ -181,25 +185,11 @@ def run_autonomous_session(
     init_dist = math.hypot(init_pos[0] - target[0], init_pos[1] - target[1])
     print(f"[Odometry] Current robot pose: x={init_pos[0]:.3f} m, y={init_pos[1]:.3f} m, theta={math.degrees(init_pos[2]):.1f}° (Distance to target: {init_dist:.2f} m)")
 
-    if teleport_to is not None and not is_real:
-        print(f"[Gazebo] Teleporting robot to starting pose: {teleport_to}")
-        if not robot.teleport_gazebo(teleport_to[0], teleport_to[1], teleport_to[2]):
-            robot.cleanup()
-            rclpy.shutdown()
-            raise RuntimeError(f"Gazebo teleportation to {teleport_to} failed; aborting run to prevent invalid pose telemetry.")
-        time.sleep(0.4)
-    elif teleport_to is not None and is_real:
+    if teleport_to is not None:
         print(f"[Hardware] Calibrating physical starting pose relative to target: {teleport_to}")
         robot.reset_pose(teleport_to[0], teleport_to[1], teleport_to[2])
         time.sleep(0.2)
-    elif init_dist < dist_tol and not is_real:
-        print(f"[Notice] Robot initialized inside dock. Teleporting to default starting pose {DEFAULT_GAZEBO_START} (first pose of the iso suite)...")
-        if not robot.teleport_gazebo(*DEFAULT_GAZEBO_START):
-            robot.cleanup()
-            rclpy.shutdown()
-            raise RuntimeError(f"Gazebo teleportation to {DEFAULT_GAZEBO_START} failed; aborting run.")
-        time.sleep(0.4)
-    elif init_dist < dist_tol and is_real:
+    elif init_dist < dist_tol:
         print(f"[Warning] Robot is already at the dock ({init_dist*100:.1f} cm <= {dist_tol*100:.1f} cm).")
 
     if is_real:
@@ -261,6 +251,7 @@ def run_autonomous_session(
                 out_w = float(cmd_raw[2])
                 if not (math.isfinite(out_vx) and math.isfinite(out_vy) and math.isfinite(out_w)):
                     robot.stop()
+                    print("\n[Safety Watchdog] Non-finite network output! Emergency stop triggered.")
                     break
                 v_cmd, vy_cmd, w_cmd = clamp_mecanum_velocity(
                     vx=out_vx * v_max_effective,
@@ -274,6 +265,7 @@ def run_autonomous_session(
                 out_w = float(cmd_raw[1])
                 if not (math.isfinite(out_v) and math.isfinite(out_w)):
                     robot.stop()
+                    print("\n[Safety Watchdog] Non-finite network output! Emergency stop triggered.")
                     break
                 v_cmd, vy_cmd, w_cmd = clamp_mecanum_velocity(
                     vx=out_v * v_max_effective,
@@ -326,7 +318,7 @@ def run_autonomous_session(
                     print(f"t={elapsed:5.1f}s | Dist: {dist_xy:5.3f}m | SE(2): {dist_pose:5.3f}m | Head: {math.degrees(abs(e_theta)):5.1f}° | v_cmd: {v_cmd:+5.2f}m/s | w_cmd: {w_cmd:+5.2f}rad/s")
 
             robot.set_cmd_vel(v_cmd, w_cmd, v_y=vy_cmd)
-            logger.log(position=pos, target=target, command=[v_cmd, w_cmd], grad=[0.0, 0.0], cost=cost)
+            logger.log(position=pos, target=target, command=[v_cmd, w_cmd, vy_cmd])
 
             time.sleep(dt)
 
@@ -370,7 +362,9 @@ def run_autonomous_session(
                 "test_id": timestamp_folder,
                 "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
                 "weights_path": os.path.abspath(weights_path),
-                "platform": "Robot Physique" if is_real else "Simulateur Gazebo",
+                "platform": "physical robot",
+                "mode": mode,
+                "output_size": output_size,
                 "target": target,
                 "start_pose": teleport_to,
                 "final_position": [round(float(p), 4) for p in final_pos],
@@ -408,7 +402,7 @@ def run_autonomous_session(
             params_path = os.path.join(test_dir, "params.json")
             with open(params_path, "w", encoding="utf-8") as f:
                 json.dump(params, f, indent=2, ensure_ascii=False)
-            print(f"[Success] Trial metadata and telemetry preserved in: {params_path}")
+            print(f"[{'Success' if success else 'Saved'}] Trial metadata and telemetry preserved in: {params_path}")
         finally:
             robot.cleanup()
             rclpy.shutdown()
@@ -418,11 +412,11 @@ def run_autonomous_session(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Closed-Loop Autonomous Positioning & Metrological Docking.")
-    parser.add_argument("--mode", choices=["diff", "mecanum"], default="mecanum", help="Kinematic mode: 'mecanum' (default) or 'diff'")
+    parser.add_argument("--mode", choices=["diff", "mecanum"], default="mecanum", help="Kinematic mode: 'mecanum' (default) or 'diff' (requires --weights of a differential model)")
     parser.add_argument("--weights", type=str, default=None, help="Path to synaptic weights JSON")
     parser.add_argument("--target", nargs=3, type=float, default=[0.0, 0.0, 0.0], help="Target pose x y theta")
     parser.add_argument("--teleport-to", "--start", nargs=3, type=float, default=None, dest="teleport_to", help="Starting pose x y theta")
-    parser.add_argument("--real", action="store_true", help="Physical hardware mode with hardware safety limits")
+    parser.add_argument("--real", action="store_true", help="Physical robot (required: no Gazebo model exists for the Mecanum LIMO)")
     parser.add_argument("--max-time", type=float, default=None, help="Maximum duration ceiling (s)")
     parser.add_argument("--dist-tol", type=float, default=None, help="Docking positioning tolerance (m)")
     parser.add_argument("--angle-tol", type=float, default=None, help="Docking orientation tolerance (rad)")

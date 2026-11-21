@@ -268,7 +268,7 @@ class LimoROS2Interface(Node):
 
         target_model = model_name or self.default_gazebo_model
         candidate_models = []
-        for m in [target_model, "limo_description", "limo", "agilex_limo"]:
+        for m in [target_model]:  # only the model named in config.json (no silent guess)
             if m and m not in candidate_models:
                 candidate_models.append(m)
 

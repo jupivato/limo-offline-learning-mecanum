@@ -1,14 +1,14 @@
 """
 Holonomic Mecanum Offline Dataset Generator for Mobile Robot Docking
 =====================================================================
-Generates a 6-column supervisory training dataset for offline
+Generates a 7-column supervisory training dataset (inputs, vx, vy, w, group_id) for offline
 behavioral cloning of a 3-output holonomic controller (vx, vy, w) on the
 AgileX LIMO mobile robot in Mecanum mode.
 
 Key Improvements:
 -----------------
 1. Restorative Deceleration Inside 8 cm: The linear and angular braking ramps
-   converge all the way to the inner core (d_stop_internal = 1.2 cm, angle = 1.1 deg)
+   converge all the way to the inner core (`d_stop_internal`, `d_stop_angle_internal`)
    rather than vanishing at the 8 cm test boundary.
 2. Continuous Turning Law at +/-180 deg: Smooth CCW symmetry breaking near +/-pi
    eliminating sign-flipping chattering.

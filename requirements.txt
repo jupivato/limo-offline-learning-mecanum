@@ -1,3 +1,3 @@
 # Python dependencies of limo-offline-learning-mecanum (ROS 2 is installed with apt, see docs/INSTALL.md)
 torch>=2.0.0
-matplotlib>=3.7.0
+matplotlib>=3.5
