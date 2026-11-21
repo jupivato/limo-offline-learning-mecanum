@@ -67,6 +67,10 @@ DEFAULT_ANGLE_TOL = float(_DOCK["angle_tol"])
 DEFAULT_DWELL_TIME = float(_DOCK["dwell_time"])
 DEFAULT_MAX_DURATION = float(_DOCK["max_duration"])
 
+# Default Gazebo start when the robot is already inside the dock and no --teleport-to
+# is given: first pose of the iso suite, (1.5 m, 1.5 m) facing the centre (-135° = 225°).
+DEFAULT_GAZEBO_START = (1.5, 1.5, -3.0 * math.pi / 4.0)
+
 DEFAULT_WEIGHTS_DIFF = "models/supervised_w_torch_diff.json"
 DEFAULT_WEIGHTS_MECANUM = _NET["weights_path"]
 
@@ -189,11 +193,11 @@ def run_autonomous_session(
         robot.reset_pose(teleport_to[0], teleport_to[1], teleport_to[2])
         time.sleep(0.2)
     elif init_dist < dist_tol and not is_real:
-        print("[Notice] Robot initialized inside dock. Teleporting to default benchmark starting pose [2.0, 2.0, 0.0]...")
-        if not robot.teleport_gazebo(2.0, 2.0, 0.0):
+        print(f"[Notice] Robot initialized inside dock. Teleporting to default starting pose {DEFAULT_GAZEBO_START} (first pose of the iso suite)...")
+        if not robot.teleport_gazebo(*DEFAULT_GAZEBO_START):
             robot.cleanup()
             rclpy.shutdown()
-            raise RuntimeError("Gazebo teleportation to [2.0, 2.0, 0.0] failed; aborting run.")
+            raise RuntimeError(f"Gazebo teleportation to {DEFAULT_GAZEBO_START} failed; aborting run.")
         time.sleep(0.4)
     elif init_dist < dist_tol and is_real:
         print(f"[Warning] Robot is already at the dock ({init_dist*100:.1f} cm <= {dist_tol*100:.1f} cm).")
