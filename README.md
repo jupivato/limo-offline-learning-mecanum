@@ -44,6 +44,7 @@ passer directement à [`docs/ROBOTS.md`](docs/ROBOTS.md).
 ```
 config.json                       tous les paramètres du projet (source unique)
 requirements.txt                  dépendances Python
+CHANGELOG.md                      historique des versions
 src/
   generate_dataset_mecanum.py     superviseur expert holonome + génération du jeu de données
   train_mecanum.py                entraînement supervisé de la PioneerNN à 3 sorties

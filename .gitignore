@@ -43,3 +43,12 @@ Thumbs.db
 .agent/
 .gemini/
 .claude/
+
+# Support material for the final report (generated figures, tables, notes): kept local
+docs/report_material/
+docs/COMPARISON_ONLINE_OFFLINE.md
+docs/THEORY.md
+docs/ACKERMANN_THEORETICAL_EXTENSION.md
+docs/REFERENCES.md
+docs/ISO_EVALUATION.md
+docs/REPRODUCIBILITY.md

@@ -39,7 +39,7 @@ entraînement/validation ne mélange jamais une copie et son original.
 python3 src/train_mecanum.py
 ```
 
-Options : `--epochs N`, `--dataset chemin.csv`, et pour ne pas écraser le modèle publié :
+Options : `--epochs N`, `--dataset chemin.csv`, `--bias` / `--no-bias`, et pour ne pas écraser le modèle publié :
 `--weights-out /tmp/w.json --history-out /tmp/h.json`.
 
 Durée : environ 20 s sur CPU. Le terminal affiche à chaque époque la perte d'entraînement et
@@ -58,8 +58,8 @@ L'historique est compatible avec le traceur du dépôt différentiel
 
 ```bash
 python3 ../limo-offline-learning/src/visualization/plot_curves.py \
-    --history models/training_history_mecanum.json --outdir data/evaluation
+    --history models/training_history_mecanum.json --outdir "$PWD/data/evaluation"
 ```
 
-Produit `data/evaluation/training_curves.png` et `.svg` (perte d'entraînement et de
-validation, taux d'apprentissage).
+Produit `data/evaluation/training_curves.png` et `.svg` dans ce dépôt (chemin absolu
+`$PWD/...` nécessaire, sinon le traceur écrit dans le dépôt différentiel).

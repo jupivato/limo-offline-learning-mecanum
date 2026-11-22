@@ -55,6 +55,26 @@ le robot au quai puis vérifie 30 s d'immobilité (8 cm, 15°). Télémétrie, g
 Vitesse : `speed_scale` = 0,55 dans `config.json` (norme de la vitesse ≤ 0,275 m/s). Pour
 limiter le patinage des rouleaux sur sol lisse : `--speed-scale 0.4`.
 
+## Récupérer les résultats sans réseau commun
+
+Les métriques ISO 18646-2 **n'ont besoin d'aucun fichier du robot** : les poses atteintes
+sont mesurées au sol et notées à la main dans la feuille de mesures, directement sur le PC.
+Les fichiers du robot (`data/evaluation/test_*`) ne servent qu'aux trajectoires et à la
+vérification.
+
+Sans SSH (PC et robot pas sur le même réseau), le plus simple est une **clé USB** branchée
+sur le robot (clavier et écran, ou session locale) :
+
+```bash
+lsblk                                   # repérer la clé (ex. /media/agilex/CLE)
+cp -r ~/limo-offline-learning-mecanum/data/evaluation/test_* /media/agilex/CLE/
+sync                                    # attendre la fin de l'écriture avant de retirer la clé
+```
+
+Alternatives : câble Ethernet direct entre le PC et le robot (puis `scp`), ou connexion du
+PC au point d'accès Wi-Fi du robot s'il en a un. Sur le PC, copier les dossiers dans
+`data/evaluation/` du dépôt, puis générer les figures avec `report_figures.py --sessions`.
+
 ## Outils utiles
 
 | Action | Commande |
@@ -62,6 +82,7 @@ limiter le patinage des rouleaux sur sol lisse : `--speed-scale 0.4`.
 | Pose en direct | `python3 src/ros2/show_pose.py` |
 | Arrêt d'urgence | `ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0, y: 0.0}, angular: {z: 0.0}}" --once` |
 | Fréquence de l'odométrie | `ros2 topic hz /odom` |
+| Tester un modèle différentiel sur ce robot | `python3 src/evaluation/run_autonomous.py --real --mode diff --weights chemin/vers/poids_diff.json` |
 | Partir d'une pose marquée au sol | `python3 src/evaluation/run_autonomous.py --real --teleport-to X Y THETA` (THETA en radians, recale l'odométrie) |
 
 Si le robot publie à la fois `/odom` et `/wheel/odom`, fixer `ros2_and_safety.odom_topic`
@@ -87,6 +108,3 @@ mesure au sol :
    cd ~/limo-offline-learning
    python3 calculus/calculate_iso_metrics.py --manual ~/mes_mesures_mecanum.csv
    ```
-
-Les formules et la lecture des résultats sont détaillées dans le
-[`ISO_EVALUATION.md` du dépôt différentiel](https://github.com/jupivato/limo-offline-learning/blob/main/docs/ISO_EVALUATION.md).
