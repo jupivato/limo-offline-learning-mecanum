@@ -6,20 +6,50 @@ où se trouve le robot au démarrage du driver**.
 
 ## Les deux robots du CERV
 
-| Robot | Système | ROS 2 | Workspace du driver |
-|---|---|---|---|
-| LIMO (standard) | Ubuntu 22.04 | Humble | `~/agilex_ws` |
-| LIMO COBOT (bras) | Ubuntu 20.04 | Foxy | `~/limo_ros2_ws` (au prompt `ros: noetic(1) foxy(2) ?`, taper `2`) |
+| | **LIMO COBOT** (avec bras) | **LIMO** (standard) |
+|---|---|---|
+| Système | Ubuntu 20.04, Python 3.8 | Ubuntu 22.04, Python 3.10 |
+| ROS 2 | Foxy | Humble |
+| Workspace du driver | `~/limo_ros2_ws` | `~/agilex_ws` |
+| À l'ouverture d'un terminal | le robot demande `ros: noetic(1) foxy(2) ?` : taper **`2`** | rien à faire |
+| Où lancer les commandes | **sur le robot** (écran et clavier, ou SSH) : sa découverte ROS 2 est limitée à la machine locale (`ROS_LOCALHOST_ONLY=1`) | sur le robot ou depuis un PC du même réseau |
 
-Dans les commandes ci-dessous, remplacer `humble` par `foxy` et `~/agilex_ws` par
-`~/limo_ros2_ws` sur le LIMO COBOT. Sur le LIMO COBOT, lancer les commandes directement sur
-le robot (en local ou par SSH).
+Sur le LIMO COBOT, `~/agilex_ws` existe aussi mais c'est un workspace **ROS 1** : ne pas l'utiliser.
 
-## Lancer un amarrage (3 terminaux)
+## 1. Préparer le robot (une seule fois)
+
+Copier le dépôt dans le dossier personnel du robot, avec `git clone` si le robot a internet,
+sinon avec une clé USB :
+
+```bash
+git clone https://github.com/jupivato/limo-offline-learning-mecanum.git ~/limo-offline-learning-mecanum
+```
+
+PyTorch est déjà installé sur les deux robots. Vérifier simplement les dépendances, **sans
+lancer `pip install -r requirements.txt`**, qui pourrait remplacer les versions du système :
+
+```bash
+python3 -c "import torch, matplotlib; print('torch', torch.__version__, '| OK')"
+```
+
+Si seul `matplotlib` manque, l'essai fonctionne quand même (le graphique final n'est pas tracé).
+
+## 2. Lancer un amarrage (3 terminaux sur le robot)
+
+Monter les roues Mecanum et poser le robot **exactement sur le quai** (cap aligné à 0°) :
+l'odométrie est mise à zéro au démarrage du driver.
 
 ### Terminal 1 : driver en mode Mecanum
 
-Monter les roues Mecanum, poser le robot **exactement sur le quai** (cap aligné à 0°), puis :
+**LIMO COBOT** (répondre `2` à la question `ros: noetic(1) foxy(2) ?`) :
+
+```bash
+source /opt/ros/foxy/setup.bash
+source ~/limo_ros2_ws/install/setup.bash
+ros2 launch limo_base limo_base.launch.py use_mcnamu:=true
+```
+
+**LIMO** :
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -27,13 +57,13 @@ source ~/agilex_ws/install/setup.bash
 ros2 launch limo_base limo_base.launch.py use_mcnamu:=true
 ```
 
-`use_mcnamu` est l'orthographe du paramètre dans le driver AgileX. Si le port série n'est pas
-détecté, ajouter `port_name:=ttyUSB0`. Laisser ce terminal ouvert pendant toute la séance.
+`use_mcnamu` est bien l'orthographe du paramètre dans le driver AgileX. Le port série
+(`ttylimo`) est détecté automatiquement. Laisser ce terminal ouvert pendant toute la séance.
 
 ### Terminal 2 : téléopération (pour éloigner le robot du quai)
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/foxy/setup.bash        # LIMO : /opt/ros/humble/setup.bash
 ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
 
@@ -43,7 +73,7 @@ robot sur sa pose de départ, appuyer sur `k` puis quitter avec `Ctrl + C`.
 ### Terminal 3 : contrôleur PioneerNN
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/foxy/setup.bash        # LIMO : /opt/ros/humble/setup.bash
 cd ~/limo-offline-learning-mecanum
 python3 src/evaluation/run_autonomous.py --real
 ```
@@ -55,7 +85,16 @@ le robot au quai puis vérifie 30 s d'immobilité (8 cm, 15°). Télémétrie, g
 Vitesse : `speed_scale` = 0,55 dans `config.json` (norme de la vitesse ≤ 0,275 m/s). Pour
 limiter le patinage des rouleaux sur sol lisse : `--speed-scale 0.4`.
 
-## Récupérer les résultats sans réseau commun
+### En cas de problème
+
+| Symptôme | Cause probable | Solution |
+|---|---|---|
+| `Package 'limo_base' not found` | workspace non sourcé, ou mauvais workspace | COBOT : `source ~/limo_ros2_ws/install/setup.bash` (pas `~/agilex_ws`) |
+| `/opt/ros/humble/setup.bash: No such file` | commande Humble sur le COBOT | utiliser `/opt/ros/foxy/setup.bash` |
+| `Waiting for valid odometry stream...` en boucle | driver arrêté, ou script lancé depuis un PC (COBOT) | relancer le terminal 1 ; sur le COBOT, tout lancer sur le robot |
+| le robot avance mais ne se déplace pas latéralement | driver lancé sans `use_mcnamu:=true` ou roues standard | relancer le driver avec `use_mcnamu:=true` |
+
+## 3. Récupérer les résultats sans réseau commun
 
 Les métriques ISO 18646-2 **n'ont besoin d'aucun fichier du robot** : les poses atteintes
 sont mesurées au sol et notées à la main dans la feuille de mesures, directement sur le PC.
@@ -75,7 +114,7 @@ Alternatives : câble Ethernet direct entre le PC et le robot (puis `scp`), ou c
 PC au point d'accès Wi-Fi du robot s'il en a un. Sur le PC, copier les dossiers dans
 `data/evaluation/` du dépôt, puis générer les figures avec `report_figures.py --sessions`.
 
-## Outils utiles
+## 4. Outils utiles
 
 | Action | Commande |
 |---|---|
@@ -88,7 +127,7 @@ PC au point d'accès Wi-Fi du robot s'il en a un. Sur le PC, copier les dossiers
 Si le robot publie à la fois `/odom` et `/wheel/odom`, fixer `ros2_and_safety.odom_topic`
 dans `config.json` pour que tous les outils lisent la même odométrie.
 
-## Mesurer la précision (ISO 18646-2)
+## 5. Mesurer la précision (ISO 18646-2)
 
 La norme ISO 18646-2 exige que la pose atteinte soit mesurée par un **système externe** :
 l'odométrie ne mesure que ce que le robot *croit*. Sans système de capture de mouvement, on

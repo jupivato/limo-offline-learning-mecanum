@@ -26,11 +26,12 @@ echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
 
 Gazebo n'est pas utile : il n'existe pas de modèle officiel du LIMO en mode Mecanum.
 
-## 3. Sur le robot
+## 3. Sur le robot (LIMO COBOT ou LIMO)
 
-Le mode Mecanum se choisit au lancement du driver (`use_mcnamu:=true`, orthographe du
-paramètre du driver AgileX), voir [`ROBOTS.md`](ROBOTS.md). Copier le dépôt sur le robot
-(`git clone`) et installer les dépendances Python comme au point 1.
+ROS 2, le driver et PyTorch sont déjà installés sur les robots du CERV : il suffit de copier
+le dépôt et de vérifier les dépendances, **sans `pip install -r requirements.txt`** (voir
+[`ROBOTS.md`](ROBOTS.md#1-préparer-le-robot-une-seule-fois)). Le mode Mecanum se choisit
+au lancement du driver (`use_mcnamu:=true`).
 
 ## 4. Vérifier l'installation
 

@@ -37,7 +37,30 @@ config.json ─► generate_dataset_mecanum.py ─► data/dataset_mecanum.csv �
 3. [`docs/ROBOTS.md`](docs/ROBOTS.md) : faire tourner le contrôleur sur le robot et mesurer ses performances (ISO 18646-2)
 
 Le jeu de données et les poids entraînés sont déjà inclus : pour une démonstration, on peut
-passer directement à [`docs/ROBOTS.md`](docs/ROBOTS.md).
+passer directement à l'essai sur le robot.
+
+## Démarrage rapide sur le LIMO COBOT (ROS 2 Foxy)
+
+Tout se lance **sur le robot**. Dans chaque nouveau terminal, répondre `2` à la question
+`ros: noetic(1) foxy(2) ?`. Le robot est posé sur le quai (cap à 0°), roues Mecanum montées.
+
+```bash
+# Terminal 1 : driver en mode Mecanum (le quai = position du robot à cet instant)
+source /opt/ros/foxy/setup.bash && source ~/limo_ros2_ws/install/setup.bash
+ros2 launch limo_base limo_base.launch.py use_mcnamu:=true
+
+# Terminal 2 : téléopération pour éloigner le robot (k = arrêt, puis Ctrl + C)
+source /opt/ros/foxy/setup.bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard
+
+# Terminal 3 : contrôleur (Entrée pour démarrer)
+source /opt/ros/foxy/setup.bash
+cd ~/limo-offline-learning-mecanum
+python3 src/evaluation/run_autonomous.py --real
+```
+
+Sur le LIMO standard (Humble), remplacer `foxy` par `humble` et `~/limo_ros2_ws` par
+`~/agilex_ws`. Détails, dépannage et mesure ISO 18646-2 : [`docs/ROBOTS.md`](docs/ROBOTS.md).
 
 ## Structure du dépôt
 
